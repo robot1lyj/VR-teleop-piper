@@ -77,6 +77,8 @@ class ArmIK:
         orientation_weight: float = 20.0,
         reg_weight: float = 0.01,
         smooth_weight: float | None = None,  # if set, adds ||q - q_last||^2
+        joint_reg_weights: np.ndarray | list[float] | None = None,
+        joint_smooth_weights: np.ndarray | list[float] | None = None,
         solver_max_iter: int = 50,
         solver_tol: float = 1e-4,
         use_meshcat: bool = False,
@@ -99,6 +101,19 @@ class ArmIK:
             list_of_joints_to_lock=joints_to_lock,
             reference_configuration=np.zeros(self.robot.model.nq),
         )
+        self.nq = self.reduced_robot.model.nq
+
+        # 逐关节正则/平滑权重；默认 1.0，后续可针对特定关节提高惩罚力度抑制抖动
+        self.joint_reg_weights = self._sanitize_joint_weights(joint_reg_weights, self.nq, "joint_reg_weights")
+        if smooth_weight is not None:
+            self.joint_smooth_weights = self._sanitize_joint_weights(
+                joint_smooth_weights, self.nq, "joint_smooth_weights"
+            )
+            self._smooth_weights_sq_dm = casadi.DM(np.square(self.joint_smooth_weights)).reshape((self.nq, 1))
+        else:
+            self.joint_smooth_weights = None
+            self._smooth_weights_sq_dm = None
+        self._reg_weights_sq_dm = casadi.DM(np.square(self.joint_reg_weights)).reshape((self.nq, 1))
 
         # Add a convenience end-effector frame on the wrist joint (default joint6)
         q_ee = rpy_to_quat(*add_ee_rpy)
@@ -156,13 +171,13 @@ class ArmIK:
                 pass
 
         # Seed & history
-        self.q_seed = np.zeros(self.reduced_robot.model.nq)
+        self.q_seed = np.zeros(self.nq)
         self.q_last = self.q_seed.copy()
 
         # --- CasADi symbolic model ---
         self.cmodel = cpin.Model(self.reduced_robot.model)
         self.cdata = self.cmodel.createData()
-        self.cq = casadi.SX.sym("q", self.reduced_robot.model.nq, 1)
+        self.cq = casadi.SX.sym("q", self.nq, 1)
         self.cTf = casadi.SX.sym("tf", 4, 4)
         cpin.framesForwardKinematics(self.cmodel, self.cdata, self.cq)
         self.ee_fid = self.reduced_robot.model.getFrameId("ee")
@@ -179,15 +194,21 @@ class ArmIK:
 
         # --- Build Opti ---
         self.opti = casadi.Opti()
-        self.var_q = self.opti.variable(self.reduced_robot.model.nq)
+        self.var_q = self.opti.variable(self.nq)
         self.param_tf = self.opti.parameter(4, 4)
-        self.param_q_last = self.opti.parameter(self.reduced_robot.model.nq) if smooth_weight else None
+        self.param_q_last = self.opti.parameter(self.nq) if smooth_weight else None
 
         cost_tracking = casadi.sumsqr(self.error_fun(self.var_q, self.param_tf))
-        cost_reg = casadi.sumsqr(self.var_q) * reg_weight
+        cost_reg = reg_weight * casadi.dot(self._reg_weights_sq_dm, casadi.power(self.var_q, 2))
         total_cost = cost_tracking + cost_reg
         if smooth_weight is not None:
-            total_cost = total_cost + smooth_weight * casadi.sumsqr(self.var_q - self.param_q_last)
+            smooth_residual = self.var_q - self.param_q_last
+            if self._smooth_weights_sq_dm is not None:
+                total_cost = total_cost + smooth_weight * casadi.dot(
+                    self._smooth_weights_sq_dm, casadi.power(smooth_residual, 2)
+                )
+            else:
+                total_cost = total_cost + smooth_weight * casadi.sumsqr(smooth_residual)
 
         # Joint limits from reduced model
         lb = self.reduced_robot.model.lowerPositionLimit
@@ -208,6 +229,41 @@ class ArmIK:
     # -----------------------------
     # Public API
     # -----------------------------
+    @staticmethod
+    def _sanitize_joint_weights(
+        weights: np.ndarray | list[float] | dict[int | str, float] | None,
+        size: int,
+        name: str,
+    ) -> np.ndarray:
+        """标准化逐关节权重，便于统一处理输入格式。"""
+
+        if weights is None:
+            return np.ones(size, dtype=float)
+
+        if isinstance(weights, dict):
+            arr = np.ones(size, dtype=float)
+            for key, value in weights.items():
+                if isinstance(key, str):
+                    key_lower = key.lower().replace("joint", "")
+                    if key_lower.startswith("j"):
+                        key_lower = key_lower[1:]
+                    idx = int(key_lower) - 1
+                else:
+                    idx = int(key)
+                if not 0 <= idx < size:
+                    raise ValueError(f"{name} index {key} out of range for nq={size}")
+                arr[idx] = float(value)
+            if np.any(arr <= 0):
+                raise ValueError(f"{name} must contain positive weights")
+            return arr
+
+        arr = np.asarray(weights, dtype=float).reshape(-1)
+        if arr.shape[0] != size:
+            raise ValueError(f"{name} length mismatch: expect {size}, got {arr.shape[0]}")
+        if np.any(arr <= 0):
+            raise ValueError(f"{name} must contain positive weights")
+        return arr
+
     def set_seed(self, q_seed: np.ndarray | list[float]) -> None:
         q_seed = np.asarray(q_seed, dtype=float).reshape(-1)
         if q_seed.shape[0] != self.reduced_robot.model.nq:

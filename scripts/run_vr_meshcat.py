@@ -15,6 +15,7 @@ import numpy as np
 import pinocchio as pin
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "run_vr_meshcat.json"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -131,8 +132,91 @@ def _replay_trajectory_sync(
         logger.info("轨迹回放完成")
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="VR 手柄 Meshcat 遥操作演示")
+def _parse_joint_weights_arg(value: Any) -> Dict[str, float] | List[float] | None:
+    """解析逐关节权重描述，支持 list / dict / 字符串。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        result: Dict[Any, float] = {}
+        for key, item in value.items():
+            result[key] = float(item)
+        return result
+
+    if isinstance(value, list):
+        return [float(item) for item in value]
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    if lowered in {"none", "null", "off"}:
+        return None
+
+    items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+    if not items:
+        return None
+
+    use_mapping = any(("=" in item) or (":" in item) for item in items)
+    if use_mapping:
+        weights: Dict[str, float] = {}
+        for item in items:
+            if "=" in item:
+                key, value = item.split("=", 1)
+            elif ":" in item:
+                key, value = item.split(":", 1)
+            else:
+                raise ValueError(f"无法解析权重项: '{item}'")
+            key = key.strip()
+            if not key:
+                raise ValueError(f"权重项缺少关节标识: '{item}'")
+            try:
+                weights[key] = float(value)
+            except ValueError as exc:
+                raise ValueError(f"权重数值无法转换为浮点数: '{value}'") from exc
+        return weights
+
+    try:
+        return [float(item) for item in items]
+    except ValueError as exc:
+        raise ValueError(f"列表形式的权重必须全部为浮点数: '{text}'") from exc
+
+
+def _create_config_parser() -> argparse.ArgumentParser:
+    """构造仅解析 --config 的父解析器，便于先行读取 JSON 配置。"""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="配置文件路径（JSON），用于覆盖默认参数",
+    )
+    return parser
+
+
+def _load_config_file(path: pathlib.Path) -> Dict[str, Any]:
+    """加载 JSON 配置并返回字典，不存在时返回空字典。"""
+
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        raise SystemExit(f"读取配置文件失败（{path}）: {exc}")
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"配置文件 {path} 必须是 JSON 对象")
+
+    return data
+
+
+def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    parents = [config_parent] if config_parent is not None else []
+    parser = argparse.ArgumentParser(description="VR 手柄 Meshcat 遥操作演示", parents=parents)
     parser.add_argument("--urdf", default="piper_description/urdf/piper_description.urdf", help="Piper URDF 路径")
     parser.add_argument("--host", default="0.0.0.0", help="WebSocket 信令监听地址")
     parser.add_argument("--port", type=int, default=8442, help="WebSocket 信令端口")
@@ -147,6 +231,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replay", help="指定录制的 JSONL 轨迹文件进行离线回放")
     parser.add_argument("--replay-speed", type=float, default=1.0, help="回放速度倍率")
     parser.add_argument("--replay-loop", action="store_true", help="循环回放轨迹")
+    parser.add_argument(
+        "--joint-reg-weights",
+        help="逐关节正则权重，如 'joint1=6,joint4=6' 或 '6,1,1,6,1,1'；输入 none 表示使用默认值",
+    )
+    parser.add_argument(
+        "--joint-smooth-weights",
+        help="逐关节平滑权重，格式同上；若未设置则沿用默认抑制方案",
+    )
     return parser
 
 
@@ -159,12 +251,25 @@ def _resolve_hands(arg: str) -> set[str]:
 def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPipeline]:
     hands = _resolve_hands(args.hands)
 
+    try:
+        reg_weights = _parse_joint_weights_arg(args.joint_reg_weights)
+        smooth_weights = _parse_joint_weights_arg(args.joint_smooth_weights)
+    except ValueError as exc:
+        raise SystemExit(f"关节权重解析失败: {exc}")
+
+    if reg_weights is None and args.joint_reg_weights is None:
+        reg_weights = {"joint1": 6.0, "joint4": 6.0}
+    if smooth_weights is None and args.joint_smooth_weights is None:
+        smooth_weights = {"joint1": 6.0, "joint4": 6.0}
+
     ik = ArmIK(
         urdf_path=args.urdf,
         use_meshcat=not args.no_meshcat,
         smooth_weight=0.05,
         position_weight=20.0,
         orientation_weight=20.0,
+        joint_reg_weights=reg_weights,
+        joint_smooth_weights=smooth_weights,
     )
 
     mapper = IncrementalPoseMapper(scale=args.scale, allowed_hands=hands)
@@ -211,9 +316,39 @@ async def run_live(args: argparse.Namespace, pipeline: TeleopPipeline) -> None:
 
 
 if __name__ == "__main__":
-    parser = build_arg_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    config_parser = _create_config_parser()
+    config_args, remaining_argv = config_parser.parse_known_args(argv)
+    # 先解析/加载 JSON 配置，允许直接通过文件统一修改参数
+    config_path = pathlib.Path(config_args.config).expanduser()
+    if not config_path.is_absolute():
+        config_path = (ROOT_DIR / config_path).resolve()
+
+    default_config_path = DEFAULT_CONFIG_PATH.resolve()
+    config_data = {}
+    if config_path.exists():
+        config_data = _load_config_file(config_path)
+    elif config_path != default_config_path:
+        raise SystemExit(f"指定的配置文件不存在: {config_path}")
+
+    parser = build_arg_parser(config_parser)
+    if config_data:
+        known_dests = {action.dest for action in parser._actions}
+        defaults: Dict[str, Any] = {}
+        for key, value in config_data.items():
+            if key not in known_dests:
+                continue
+            # 仅保留解析器认可的键，逐项覆盖默认值
+            if isinstance(value, list):
+                defaults[key] = list(value)
+            else:
+                defaults[key] = value
+        parser.set_defaults(**defaults)
+
+    args = parser.parse_args(remaining_argv)
+    args.config = str(config_path)
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
+    logging.getLogger(__name__).info("使用配置文件: %s", args.config)
 
     session, pipeline = build_session(args)
 

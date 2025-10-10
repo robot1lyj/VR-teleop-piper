@@ -106,6 +106,7 @@ pip install aiortc websockets numpy pin python-casadi meshcat
    ```
    - 首次运行会加载 Piper 中立关节姿态作为参考点。
    - Meshcat 页面的 URL 会出现在终端中，复制到浏览器即可查看机器人模型。
+   - 默认参数集中在 `configs/run_vr_meshcat.json`，修改该文件即可调整端口、缩放、关节权重等设置；如需临时覆盖，可继续使用命令行标志，例如 `--joint-reg-weights joint1=5,joint4=8`。
 2. 在另一终端启动 Web UI：
    ```bash
    python -m http.server 8080 --directory web-ui
@@ -163,6 +164,15 @@ python scripts/run_vr_meshcat.py \
 | `--no-meshcat` | `run_vr_meshcat.py` | 仅回放/求解 IK，不启动 Meshcat（服务器冲突时使用）。 |
 | `--no-collision` | `run_vr_meshcat.py` | 禁用自碰撞检测，规避几何配置异常导致的崩溃。 |
 | `--urdf` | `run_vr_meshcat.py` | 机械臂 URDF 路径，可替换为自定义模型。 |
+| `--config` | `run_vr_meshcat.py` | 指定 JSON 配置文件，默认 `configs/run_vr_meshcat.json`。 |
+| `--joint-reg-weights` | `run_vr_meshcat.py` | 逐关节正则权重，支持 `joint1=6,joint4=6` 或 `6,1,1,6,1,1`，输入 `none` 关闭自定义。 |
+| `--joint-smooth-weights` | `run_vr_meshcat.py` | 逐关节平滑权重，格式同上；未设置时沿用默认抑制 1/4 号关节方案。 |
+
+### 配置文件说明
+
+- `configs/run_vr_meshcat.json` 会在脚本启动时自动加载，缺失字段则使用脚本默认值。
+- 支持直接修改布尔值（如 `"no_stun": true`）、数值或关节权重字典（键可写成 `joint1` 或数字编号）。
+- 命令行参数始终优先生效，便于快速对比不同配置；若想切换成另一套完整配置，可复制该文件并通过 `--config path/to/file.json` 指定。
 
 ### 常见排查
 

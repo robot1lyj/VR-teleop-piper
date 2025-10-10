@@ -1,0 +1,24 @@
+{
+  "urdf": "piper_description/urdf/piper_description.urdf",
+  "host": "0.0.0.0",
+  "port": 8442,
+  "channel": "controller",
+  "scale": 1.0,
+  "no_meshcat": false,
+  "hands": "right",
+  "no_stun": true,
+  "stun": [],
+  "log_level": "info",
+  "no_collision": true,
+  "replay": "output.jsonl",
+  "replay_speed": 1.0,
+  "replay_loop": false,
+  "joint_reg_weights": {
+    "joint1": 6.0,
+    "joint4": 10
+  },
+  "joint_smooth_weights": {
+    "joint1": 6.0,
+    "joint4": 10
+  }
+}
