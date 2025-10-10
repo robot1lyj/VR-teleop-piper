@@ -83,3 +83,89 @@
 - **纯脚本测试**：可以通过 `python - <<'PY'` 直接构造 `ControllerPipeline` 并注入样例 payload，便于单元级验证。
 
 > 当前方案专为局域网场景设计，默认不启用 TLS/证书，也不提供多客户端抢占逻辑。如需互联网部署或并发接入，可在此基础上扩展。 
+
+## VR 增量遥操作完整流程
+
+### 依赖准备
+
+```bash
+pip install aiortc websockets numpy pin python-casadi meshcat
+```
+
+确保浏览器端可以访问本机 8442（信令）和 8080（http.server）端口，Meshcat 页面默认会在脚本启动后自动打开或输出可访问的 URL。
+
+### 实时遥操作（Meshcat 演示）
+
+1. 启动 Meshcat 演示脚本：
+   ```bash
+   python scripts/run_vr_meshcat.py \
+     --urdf piper_description/urdf/piper_description.urdf \
+     --hands right \
+     --scale 1.0 \
+     --log-level info
+   ```
+   - 首次运行会加载 Piper 中立关节姿态作为参考点。
+   - Meshcat 页面的 URL 会出现在终端中，复制到浏览器即可查看机器人模型。
+2. 在另一终端启动 Web UI：
+   ```bash
+   python -m http.server 8080 --directory web-ui
+   ```
+3. 在头显 / 浏览器访问 `http://<电脑IP>:8080` → 填写 `ws://<电脑IP>:8442` 建立连接 → 点击「开启手柄追踪」。
+4. 长按握持键进入增量控制：
+   - 位移由固定矩阵 `R_bv` 映射到机械臂基座坐标系，再与参考位姿相加。
+   - 四元数先转换为相对旋转，再通过 `R_bv` 映射到基座系，更新末端姿态。
+   - 终端会输出 IK 结果（成功 / 失败原因）以及当前目标平移位置。
+5. 松开握持键即可复位增量；扳机值大于 0.5 时会在日志中标记夹爪闭合。
+
+### 轨迹录制（可选）
+
+1. 运行录制脚本（示例开启自动开始/停止）：
+   ```bash
+   python scripts/record_vr_trajectory.py output.jsonl \
+     --hands right \
+     --channel controller \
+     --no-stun \
+     --auto-start \
+     --auto-stop
+   ```
+   - 自动开始：任意参与录制的手柄握持键持续按下 ≈3 帧（可用 `--start-grip-threshold` 调整）后写入。
+   - 自动停止：手柄长按 A/B（或 X/Y）约 0.8 秒触发 `menuPressed`，脚本自动收尾并退出。
+2. 按照实时遥操作同样的方式连接手柄，若未开启自动停止，可按 `Ctrl+C` 手动结束，JSONL 文件会保存每帧的原始报文和归一化结果。
+3. 可为不同测试场景建立多个轨迹文件，以便复用。
+
+### 离线回放（无需硬件）
+
+```bash
+python scripts/run_vr_meshcat.py \
+  --replay output.jsonl \
+  --replay-speed 1.0 \
+  --hands right \
+  --urdf piper_description/urdf/piper_description.urdf \
+  [--no-meshcat] [--no-collision]
+```
+
+- `--replay-speed` 用于加速 / 减速回放（例如 0.5 表示慢放，2.0 表示倍速）。
+- 配合 `--replay-loop` 可以循环播放，便于长时间观察 Meshcat 中的末端路径。
+- 回放期间同样会输出 IK 结果和目标位姿，验证计算链路是否稳定。
+
+### 主要参数说明
+
+| 参数 | 脚本 | 说明 |
+| ---- | ---- | ---- |
+| `--scale` | `run_vr_meshcat.py` | 控制 VR 位移映射后的缩放，调大可放大手柄位移。 |
+| `--hands` | 两个脚本 | 指定使用哪只手柄（`right`/`left`/`both`），需与 DataChannel 推送的键一致。 |
+| `--channel` | 两个脚本 | DataChannel 名称，需与 `web-ui/vr_app.js` 中配置保持一致。 |
+| `--no-stun` / `--stun` | 两个脚本 | 是否禁用 STUN（局域网推荐 `--no-stun`）。 |
+| `--log-level` | 两个脚本 | 调整日志详情，调试时可改为 `debug`。 |
+| `--auto-start` / `--auto-stop` | `record_vr_trajectory.py` | 握持触发录制、菜单键长按自动完结。 |
+| `--start-grip-threshold` | `record_vr_trajectory.py` | 自动开始所需的连续握持帧数（默认 3）。 |
+| `--replay-speed` / `--replay-loop` | `run_vr_meshcat.py` | 离线回放速度倍率与是否循环。 |
+| `--no-meshcat` | `run_vr_meshcat.py` | 仅回放/求解 IK，不启动 Meshcat（服务器冲突时使用）。 |
+| `--no-collision` | `run_vr_meshcat.py` | 禁用自碰撞检测，规避几何配置异常导致的崩溃。 |
+| `--urdf` | `run_vr_meshcat.py` | 机械臂 URDF 路径，可替换为自定义模型。 |
+
+### 常见排查
+
+- **Meshcat 页面空白**：重启脚本并确保浏览器访问的是最新的 URL；如仍失败，可单独启动 `meshcat-server` 并设置环境变量以复用已有服务端口。
+- **IK 频繁失败**：降低 `--scale` 或调整参考姿态，确保目标位姿落在 Piper 的可达空间；必要时暂时关闭 `check_collision`。
+- **轨迹文件过大**：录制脚本默认逐帧 flush，可改为运行结束后手动压缩，或在后续处理管线中按时间段切片。
