@@ -13,12 +13,8 @@
   "replay": "output.jsonl",
   "replay_speed": 1.0,
   "replay_loop": false,
-  "joint_reg_weights": {
-    "joint1": 6.0,
-    "joint4": 10
-  },
-  "joint_smooth_weights": {
-    "joint1": 6.0,
-    "joint4": 10
-  }
+  "joint_reg_weights": [5.0, 1.0, 1.0, 5.0, 1.0, 1.0],
+  "joint_smooth_weights": [8.0, 1.0, 1.0, 8.0, 1.0, 1.0],
+  "swivel_range_deg": 40.0,
+  "trust_region": [0.05, 0.12, 0.12, 0.02, 0.12, 0.20]
 }

@@ -184,6 +184,41 @@ def _parse_joint_weights_arg(value: Any) -> Dict[str, float] | List[float] | Non
         raise ValueError(f"列表形式的权重必须全部为浮点数: '{text}'") from exc
 
 
+def _parse_trust_region_arg(value: Any) -> float | List[float] | None:
+    """解析信赖域设置，支持标量或逗号分隔列表。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, list):
+        return [float(item) for item in value]
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.lower() in {"none", "null", "off"}:
+        return None
+
+    items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+    if not items:
+        return None
+
+    if len(items) == 1:
+        try:
+            return float(items[0])
+        except ValueError as exc:
+            raise ValueError(f"信赖域参数需为浮点数，收到: '{items[0]}'") from exc
+
+    try:
+        return [float(item) for item in items]
+    except ValueError as exc:
+        raise ValueError(f"信赖域列表需全部为浮点数: '{text}'") from exc
+
+
 def _create_config_parser() -> argparse.ArgumentParser:
     """构造仅解析 --config 的父解析器，便于先行读取 JSON 配置。"""
 
@@ -239,6 +274,16 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         "--joint-smooth-weights",
         help="逐关节平滑权重，格式同上；若未设置则沿用默认抑制方案",
     )
+    parser.add_argument(
+        "--swivel-range-deg",
+        type=float,
+        default=None,
+        help="肘部 swivel 角限制（度），例如 40 表示允许 ±40°",
+    )
+    parser.add_argument(
+        "--trust-region",
+        help="逐关节信赖域限制，支持标量或长度为关节数的列表，单位为弧度",
+    )
     return parser
 
 
@@ -257,10 +302,21 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
     except ValueError as exc:
         raise SystemExit(f"关节权重解析失败: {exc}")
 
+    try:
+        trust_region = _parse_trust_region_arg(args.trust_region)
+    except ValueError as exc:
+        raise SystemExit(f"信赖域解析失败: {exc}")
+
     if reg_weights is None and args.joint_reg_weights is None:
-        reg_weights = {"joint1": 6.0, "joint4": 6.0}
+        reg_weights = [5.0, 1.0, 1.0, 5.0, 1.0, 1.0]
     if smooth_weights is None and args.joint_smooth_weights is None:
-        smooth_weights = {"joint1": 6.0, "joint4": 6.0}
+        smooth_weights = [8.0, 1.0, 1.0, 8.0, 1.0, 1.0]
+
+    swivel_limit = None
+    if args.swivel_range_deg is not None:
+        limit_deg = float(args.swivel_range_deg)
+        if limit_deg > 0.0:
+            swivel_limit = np.deg2rad(limit_deg)
 
     ik = ArmIK(
         urdf_path=args.urdf,
@@ -270,6 +326,8 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         orientation_weight=20.0,
         joint_reg_weights=reg_weights,
         joint_smooth_weights=smooth_weights,
+        swivel_limit=swivel_limit,
+        trust_region=trust_region,
     )
 
     mapper = IncrementalPoseMapper(scale=args.scale, allowed_hands=hands)

@@ -167,11 +167,14 @@ python scripts/run_vr_meshcat.py \
 | `--config` | `run_vr_meshcat.py` | 指定 JSON 配置文件，默认 `configs/run_vr_meshcat.json`。 |
 | `--joint-reg-weights` | `run_vr_meshcat.py` | 逐关节正则权重，支持 `joint1=6,joint4=6` 或 `6,1,1,6,1,1`，输入 `none` 关闭自定义。 |
 | `--joint-smooth-weights` | `run_vr_meshcat.py` | 逐关节平滑权重，格式同上；未设置时沿用默认抑制 1/4 号关节方案。 |
+| `--swivel-range-deg` | `run_vr_meshcat.py` | 肘部 swivel 角硬约束（度），以中立姿态为零点，40 表示允许 ±40°，0 关闭。 |
+| `--trust-region` | `run_vr_meshcat.py` | 单步信赖域（弧度），限制 `q` 偏离上一帧的幅度，可填标量或 6 元列表。 |
 
 ### 配置文件说明
 
 - `configs/run_vr_meshcat.json` 会在脚本启动时自动加载，缺失字段则使用脚本默认值。
-- 支持直接修改布尔值（如 `"no_stun": true`）、数值或关节权重字典（键可写成 `joint1` 或数字编号）。
+- 支持直接修改布尔值（如 `"no_stun": true`）、数值，以及长度为 6 的关节权重列表，例如 `"joint_reg_weights": [5,1,1,5,1,1]`、`"joint_smooth_weights": [8,1,1,8,1,1]`。
+- 新增 `swivel_range_deg`（肘部旋转硬约束范围，单位度，以中立姿态为零点）与 `trust_region`（逐关节单步上限，单位弧度）字段，可直接在 JSON 中调整，脚本会自动加载。
 - 命令行参数始终优先生效，便于快速对比不同配置；若想切换成另一套完整配置，可复制该文件并通过 `--config path/to/file.json` 指定。
 
 ### 常见排查

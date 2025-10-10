@@ -79,6 +79,8 @@ class ArmIK:
         smooth_weight: float | None = None,  # if set, adds ||q - q_last||^2
         joint_reg_weights: np.ndarray | list[float] | None = None,
         joint_smooth_weights: np.ndarray | list[float] | None = None,
+        swivel_limit: float | None = None,
+        trust_region: float | np.ndarray | list[float] | None = None,
         solver_max_iter: int = 50,
         solver_tol: float = 1e-4,
         use_meshcat: bool = False,
@@ -102,6 +104,8 @@ class ArmIK:
             reference_configuration=np.zeros(self.robot.model.nq),
         )
         self.nq = self.reduced_robot.model.nq
+        self._joint_lower = self.reduced_robot.model.lowerPositionLimit.copy()
+        self._joint_upper = self.reduced_robot.model.upperPositionLimit.copy()
 
         # 逐关节正则/平滑权重；默认 1.0，后续可针对特定关节提高惩罚力度抑制抖动
         self.joint_reg_weights = self._sanitize_joint_weights(joint_reg_weights, self.nq, "joint_reg_weights")
@@ -114,6 +118,23 @@ class ArmIK:
             self.joint_smooth_weights = None
             self._smooth_weights_sq_dm = None
         self._reg_weights_sq_dm = casadi.DM(np.square(self.joint_reg_weights)).reshape((self.nq, 1))
+
+        # 肘部平面约束与信赖域控制的配置参数
+        self.swivel_limit = self._sanitize_swivel_limit(swivel_limit)
+        self._swivel_eps = 1e-9
+        self.trust_region = self._sanitize_trust_region(trust_region, self.nq)
+
+        # 记录关键关节 ID，便于计算肘部法向
+        self.shoulder_joint_id = self.reduced_robot.model.getJointId("joint2")
+        self.elbow_joint_id = self.reduced_robot.model.getJointId("joint4")
+        self.wrist_joint_id = self.reduced_robot.model.getJointId("joint6")
+        for name, jid in {
+            "joint2": self.shoulder_joint_id,
+            "joint4": self.elbow_joint_id,
+            "joint6": self.wrist_joint_id,
+        }.items():
+            if jid <= 0:
+                raise ValueError(f"未在模型中找到 {name}，请检查 URDF")
 
         # Add a convenience end-effector frame on the wrist joint (default joint6)
         q_ee = rpy_to_quat(*add_ee_rpy)
@@ -170,9 +191,22 @@ class ArmIK:
             except Exception:
                 pass
 
-        # Seed & history
-        self.q_seed = np.zeros(self.nq)
-        self.q_last = self.q_seed.copy()
+        # Seed & swivel 参考姿态
+        q_neutral = pin.neutral(self.reduced_robot.model)
+        self.q_seed = q_neutral.copy()
+        self.q_last = q_neutral.copy()
+
+        self._ref_elbow_normal: np.ndarray | None = None
+        self._ref_elbow_axis: np.ndarray | None = None
+        if self.swivel_limit is not None:
+            ref_normal = self._compute_elbow_normal(q_neutral)
+            ref_axis = self._compute_elbow_axis(q_neutral)
+            if ref_normal is not None and ref_axis is not None:
+                self._ref_elbow_normal = ref_normal
+                self._ref_elbow_axis = ref_axis
+            else:
+                # 奇异参考位姿无法取得法向/轴向，禁用 swivel 约束
+                self.swivel_limit = None
 
         # --- CasADi symbolic model ---
         self.cmodel = cpin.Model(self.reduced_robot.model)
@@ -210,10 +244,52 @@ class ArmIK:
             else:
                 total_cost = total_cost + smooth_weight * casadi.sumsqr(smooth_residual)
 
+        # 肘部硬约束：限制相对于参考姿态的 swivel 角
+        self.param_swivel_limit = None
+        self._elbow_normal_fun: casadi.Function | None = None
+        if (
+            self.swivel_limit is not None
+            and self._ref_elbow_normal is not None
+            and self._ref_elbow_axis is not None
+        ):
+            def _casadi_cross(a: casadi.SX, b: casadi.SX) -> casadi.SX:
+                return casadi.vertcat(
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                )
+
+            shoulder_pos = self.cdata.oMi[self.shoulder_joint_id].translation
+            elbow_pos = self.cdata.oMi[self.elbow_joint_id].translation
+            wrist_pos = self.cdata.oMi[self.wrist_joint_id].translation
+
+            upper_vec = elbow_pos - shoulder_pos
+            forearm_vec = wrist_pos - elbow_pos
+            normal_raw = _casadi_cross(upper_vec, forearm_vec)
+            normal_unit = normal_raw / casadi.sqrt(casadi.sumsqr(normal_raw) + self._swivel_eps)
+            self._elbow_normal_fun = casadi.Function("elbow_normal", [self.cq], [normal_unit])
+
+            normal_ref_vec = casadi.MX(casadi.DM(self._ref_elbow_normal))
+            axis_ref_vec = casadi.MX(casadi.DM(self._ref_elbow_axis))
+            normal_unit_expr = self._elbow_normal_fun(self.var_q)
+            angle_num = casadi.dot(axis_ref_vec, casadi.cross(normal_ref_vec, normal_unit_expr))
+            angle_den = casadi.dot(normal_ref_vec, normal_unit_expr)
+            swivel_delta = casadi.atan2(angle_num, angle_den)
+
+            self.param_swivel_limit = self.opti.parameter()
+            self.opti.subject_to(swivel_delta <= self.param_swivel_limit)
+            self.opti.subject_to(-self.param_swivel_limit <= swivel_delta)
+
         # Joint limits from reduced model
         lb = self.reduced_robot.model.lowerPositionLimit
         ub = self.reduced_robot.model.upperPositionLimit
         self.opti.subject_to(self.opti.bounded(lb, self.var_q, ub))
+
+        # 逐帧可调的信赖域控制（通过参数覆盖）
+        self.param_step_lower = self.opti.parameter(self.nq)
+        self.param_step_upper = self.opti.parameter(self.nq)
+        self.opti.subject_to(self.param_step_lower <= self.var_q)
+        self.opti.subject_to(self.var_q <= self.param_step_upper)
         self.opti.minimize(total_cost)
 
         opts = {
@@ -264,6 +340,48 @@ class ArmIK:
             raise ValueError(f"{name} must contain positive weights")
         return arr
 
+    @staticmethod
+    def _sanitize_trust_region(
+        region: float | np.ndarray | list[float] | None,
+        size: int,
+    ) -> np.ndarray | None:
+        """标准化单步信赖域上限，支持标量或长度为 nq 的列表。"""
+
+        if region is None:
+            return None
+
+        if np.isscalar(region):
+            value = float(region)
+            if value <= 0:
+                raise ValueError("trust_region 必须为正数或 None")
+            return np.full(size, value, dtype=float)
+
+        arr = np.asarray(region, dtype=float).reshape(-1)
+        if arr.size == 1:
+            value = float(arr[0])
+            if value <= 0:
+                raise ValueError("trust_region 必须为正数或 None")
+            return np.full(size, value, dtype=float)
+        if arr.size != size:
+            raise ValueError(f"trust_region 大小不匹配: 期望 {size}, 实际 {arr.size}")
+        if np.any(arr <= 0):
+            raise ValueError("trust_region 中必须全部为正数")
+        return arr
+
+    @staticmethod
+    def _sanitize_swivel_limit(limit: float | None) -> float | None:
+        """将 swivel 限制角度归一化为弧度，None 表示关闭约束。"""
+
+        if limit is None:
+            return None
+
+        value = float(limit)
+        if value <= 0:
+            return None
+        if value > np.pi:
+            value = np.pi
+        return value
+
     def set_seed(self, q_seed: np.ndarray | list[float]) -> None:
         q_seed = np.asarray(q_seed, dtype=float).reshape(-1)
         if q_seed.shape[0] != self.reduced_robot.model.nq:
@@ -282,11 +400,26 @@ class ArmIK:
             if T.shape != (4,4):
                 raise ValueError("target must be SE3 or (4,4) array")
 
-        # initial guess
+        # initial guess 与约束参数设置
         self.opti.set_initial(self.var_q, self.q_seed)
         self.opti.set_value(self.param_tf, T)
         if self.param_q_last is not None:
             self.opti.set_value(self.param_q_last, self.q_last)
+
+        # 信赖域：以上一帧解为中心，控制单步最大改变量
+        if self.param_step_lower is not None and self.param_step_upper is not None:
+            if self.trust_region is not None:
+                lower = np.maximum(self._joint_lower, self.q_last - self.trust_region)
+                upper = np.minimum(self._joint_upper, self.q_last + self.trust_region)
+            else:
+                lower = self._joint_lower
+                upper = self._joint_upper
+            self.opti.set_value(self.param_step_lower, lower)
+            self.opti.set_value(self.param_step_upper, upper)
+
+        # 肘部硬约束参数赋值
+        if self.param_swivel_limit is not None and self.swivel_limit is not None:
+            self.opti.set_value(self.param_swivel_limit, self.swivel_limit)
 
         if self.use_meshcat:
             try:
@@ -319,6 +452,36 @@ class ArmIK:
         except Exception as e:
             # On failure, keep last seed; user may swap seed and retry.
             return None, False, f"solve failed: {e}"
+
+    def _compute_elbow_normal(self, q: np.ndarray) -> np.ndarray | None:
+        """给定关节角，计算上臂-前臂确定的单位法向；奇异位形返回 None。"""
+
+        data = self.reduced_robot.data
+        pin.forwardKinematics(self.reduced_robot.model, data, q)
+        shoulder = data.oMi[self.shoulder_joint_id].translation
+        elbow = data.oMi[self.elbow_joint_id].translation
+        wrist = data.oMi[self.wrist_joint_id].translation
+
+        upper = elbow - shoulder
+        forearm = wrist - elbow
+        normal = np.cross(upper, forearm)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-8:
+            return None
+        return normal / norm
+
+    def _compute_elbow_axis(self, q: np.ndarray) -> np.ndarray | None:
+        """计算前臂方向，用于 swivel 角参考轴。"""
+
+        data = self.reduced_robot.data
+        pin.forwardKinematics(self.reduced_robot.model, data, q)
+        elbow = data.oMi[self.elbow_joint_id].translation
+        wrist = data.oMi[self.wrist_joint_id].translation
+        axis = wrist - elbow
+        norm = np.linalg.norm(axis)
+        if norm < 1e-8:
+            return None
+        return axis / norm
 
     def is_self_collision(self, q: np.ndarray, gripper: np.ndarray | None = None) -> bool:
         """Very simple pair-based collision check using full model geom.
