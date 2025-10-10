@@ -27,6 +27,8 @@ import pinocchio as pin
 from pinocchio import casadi as cpin
 from pinocchio.robot_wrapper import RobotWrapper
 
+from .constraints import JointConstraintManager
+
 try:
     # Meshcat is optional; keep import local and guarded
     import meshcat.geometry as mg
@@ -81,6 +83,7 @@ class ArmIK:
         joint_smooth_weights: np.ndarray | list[float] | None = None,
         swivel_limit: float | None = None,
         trust_region: float | np.ndarray | list[float] | None = None,
+        joint_constraints: dict | None = None,
         solver_max_iter: int = 50,
         solver_tol: float = 1e-4,
         use_meshcat: bool = False,
@@ -123,6 +126,9 @@ class ArmIK:
         self.swivel_limit = self._sanitize_swivel_limit(swivel_limit)
         self._swivel_eps = 1e-9
         self.trust_region = self._sanitize_trust_region(trust_region, self.nq)
+        self.constraint_manager = JointConstraintManager.from_config(
+            self.reduced_robot.model, joint_constraints or {}
+        )
 
         # 记录关键关节 ID，便于计算肘部法向
         self.shoulder_joint_id = self.reduced_robot.model.getJointId("joint2")
@@ -412,8 +418,11 @@ class ArmIK:
                 lower = np.maximum(self._joint_lower, self.q_last - self.trust_region)
                 upper = np.minimum(self._joint_upper, self.q_last + self.trust_region)
             else:
-                lower = self._joint_lower
-                upper = self._joint_upper
+                lower = self._joint_lower.copy()
+                upper = self._joint_upper.copy()
+
+            if self.constraint_manager is not None:
+                lower, upper = self.constraint_manager.adjust_bounds(self.q_last, lower, upper)
             self.opti.set_value(self.param_step_lower, lower)
             self.opti.set_value(self.param_step_upper, upper)
 
@@ -432,6 +441,8 @@ class ArmIK:
             q = np.asarray(self.opti.value(self.var_q)).reshape(-1)
             self.q_last = q.copy()
             self.q_seed = q.copy()  # warm-start next call
+            if self.constraint_manager is not None:
+                self.constraint_manager.update_after_solve(q)
 
             ok = True
             info = "ok"

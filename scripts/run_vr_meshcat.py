@@ -184,6 +184,29 @@ def _parse_joint_weights_arg(value: Any) -> Dict[str, float] | List[float] | Non
         raise ValueError(f"列表形式的权重必须全部为浮点数: '{text}'") from exc
 
 
+def _parse_joint_constraints_arg(value: Any) -> Dict[str, Any] | None:
+    """解析关节约束参数，允许字典或 JSON 字符串。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"joint_constraints JSON 解析失败: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("joint_constraints 必须是 JSON 对象")
+    return parsed
+
+
 def _parse_trust_region_arg(value: Any) -> float | List[float] | None:
     """解析信赖域设置，支持标量或逗号分隔列表。"""
 
@@ -284,6 +307,10 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         "--trust-region",
         help="逐关节信赖域限制，支持标量或长度为关节数的列表，单位为弧度",
     )
+    parser.add_argument(
+        "--joint-constraints",
+        help="额外的关节硬约束/步长设置，可提供 JSON 字符串或在配置文件中直接写字典",
+    )
     return parser
 
 
@@ -307,6 +334,11 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
     except ValueError as exc:
         raise SystemExit(f"信赖域解析失败: {exc}")
 
+    try:
+        joint_constraints = _parse_joint_constraints_arg(args.joint_constraints)
+    except ValueError as exc:
+        raise SystemExit(f"关节约束解析失败: {exc}")
+
     if reg_weights is None and args.joint_reg_weights is None:
         reg_weights = [5.0, 1.0, 1.0, 5.0, 1.0, 1.0]
     if smooth_weights is None and args.joint_smooth_weights is None:
@@ -328,6 +360,7 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         joint_smooth_weights=smooth_weights,
         swivel_limit=swivel_limit,
         trust_region=trust_region,
+        joint_constraints=joint_constraints,
     )
 
     mapper = IncrementalPoseMapper(scale=args.scale, allowed_hands=hands)
