@@ -196,6 +196,10 @@ class ArmIK:
                 )
             except Exception:
                 pass
+            self._meshcat_base_transform = np.eye(4)
+        else:
+            self.vis = None
+            self._meshcat_base_transform = None
 
         # Seed & swivel 参考姿态
         q_neutral = pin.neutral(self.reduced_robot.model)
@@ -432,7 +436,11 @@ class ArmIK:
 
         if self.use_meshcat:
             try:
-                self.vis.viewer['ee_target'].set_transform(T)
+                if self._meshcat_base_transform is not None:
+                    target_display = self._meshcat_base_transform @ T
+                else:
+                    target_display = T
+                self.vis.viewer['ee_target'].set_transform(target_display)
             except Exception:
                 pass
 

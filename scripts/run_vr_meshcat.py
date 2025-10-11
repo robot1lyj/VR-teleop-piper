@@ -22,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 from webrtc_endpoint import VRWebRTCServer
 from robot.ik import ArmIK
 from robot.teleop import ArmTeleopSession, IncrementalPoseMapper
+from robot.teleop.incremental_mapper import R_BV_DEFAULT
 
 
 class TeleopPipeline:
@@ -207,6 +208,96 @@ def _parse_joint_constraints_arg(value: Any) -> Dict[str, Any] | None:
     return parsed
 
 
+def _parse_mount_rpy_deg(value: Any) -> np.ndarray | None:
+    """解析基座安装姿态（RPY，单位度），为空则返回 None。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+
+    if len(items) != 3:
+        raise ValueError("安装 RPY 需要提供 3 个角度（度）")
+
+    try:
+        arr = np.array([float(item) for item in items], dtype=float)
+    except ValueError as exc:
+        raise ValueError("安装 RPY 角度必须为浮点数") from exc
+
+    return arr
+
+
+def _parse_home_q_deg(value: Any) -> np.ndarray | None:
+    """解析自定义关节初始角（单位度），允许列表/逗号分隔字符串。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+
+    if not items:
+        return None
+
+    try:
+        return np.array([float(item) for item in items], dtype=float)
+    except ValueError as exc:
+        raise ValueError("home_q_deg 必须全部为浮点数") from exc
+
+
+def _rotation_from_rpy_deg(rpy_deg: np.ndarray | None) -> np.ndarray:
+    """将 RPY 角（度）转换为旋转矩阵，未指定则返回单位矩阵。"""
+
+    if rpy_deg is None:
+        return np.eye(3)
+
+    rpy_deg = np.asarray(rpy_deg, dtype=float).reshape(3)
+    rpy_rad = np.deg2rad(rpy_deg)
+
+    if hasattr(pin.rpy, "rpyToMatrix"):
+        return pin.rpy.rpyToMatrix(rpy_rad)
+    if hasattr(pin.rpy, "matrixFromRpy"):
+        return pin.rpy.matrixFromRpy(rpy_rad)
+    utils = getattr(pin, "utils", None)
+    if utils is not None and hasattr(utils, "rpyToMatrix"):
+        return utils.rpyToMatrix(rpy_rad)
+    raise RuntimeError("当前 Pinocchio 版本不支持 RPY 转换函数")
+
+
+def _parse_mount_offset(value: Any) -> np.ndarray | None:
+    """解析基座平移（米），允许列表/逗号分隔字符串。"""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+
+    if len(items) != 3:
+        raise ValueError("mount_offset 需要提供 xyz 三个分量")
+
+    try:
+        return np.array([float(item) for item in items], dtype=float)
+    except ValueError as exc:
+        raise ValueError("mount_offset 必须全部为浮点数") from exc
+
+
 def _parse_trust_region_arg(value: Any) -> float | List[float] | None:
     """解析信赖域设置，支持标量或逗号分隔列表。"""
 
@@ -311,6 +402,18 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         "--joint-constraints",
         help="额外的关节硬约束/步长设置，可提供 JSON 字符串或在配置文件中直接写字典",
     )
+    parser.add_argument(
+        "--mount-rpy-deg",
+        help="机械臂基座绕 XYZ（度）的安装姿态，格式如 '0,30,0'，默认水平正装",
+    )
+    parser.add_argument(
+        "--home-q-deg",
+        help="自定义初始关节角（度），按 joint1..jointN 顺序提供，例如 '0,-45,30,0,15,0'",
+    )
+    parser.add_argument(
+        "--mount-offset",
+        help="机械臂基座在 Meshcat 中的平移偏置（米），格式如 '0,0,0.15'",
+    )
     return parser
 
 
@@ -339,6 +442,21 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
     except ValueError as exc:
         raise SystemExit(f"关节约束解析失败: {exc}")
 
+    try:
+        mount_rpy_deg = _parse_mount_rpy_deg(args.mount_rpy_deg)
+    except ValueError as exc:
+        raise SystemExit(f"安装姿态解析失败: {exc}")
+
+    try:
+        home_q_deg = _parse_home_q_deg(args.home_q_deg)
+    except ValueError as exc:
+        raise SystemExit(f"初始关节角解析失败: {exc}")
+
+    try:
+        mount_offset = _parse_mount_offset(args.mount_offset)
+    except ValueError as exc:
+        raise SystemExit(f"安装平移解析失败: {exc}")
+
     if reg_weights is None and args.joint_reg_weights is None:
         reg_weights = [5.0, 1.0, 1.0, 5.0, 1.0, 1.0]
     if smooth_weights is None and args.joint_smooth_weights is None:
@@ -349,6 +467,27 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         limit_deg = float(args.swivel_range_deg)
         if limit_deg > 0.0:
             swivel_limit = np.deg2rad(limit_deg)
+
+    mount_rotation = _rotation_from_rpy_deg(mount_rpy_deg)
+    if mount_rpy_deg is not None:
+        logging.getLogger(__name__).info(
+            "应用基座安装 RPY(度)：[%.2f, %.2f, %.2f]",
+            mount_rpy_deg[0],
+            mount_rpy_deg[1],
+            mount_rpy_deg[2],
+        )
+    if mount_offset is not None:
+        mount_offset = np.asarray(mount_offset, dtype=float).reshape(3)
+        logging.getLogger(__name__).info(
+            "应用基座平移 (m)：[%.3f, %.3f, %.3f]",
+            mount_offset[0],
+            mount_offset[1],
+            mount_offset[2],
+        )
+    else:
+        mount_offset = np.zeros(3)
+
+    mapper_rotation = mount_rotation.T @ R_BV_DEFAULT
 
     ik = ArmIK(
         urdf_path=args.urdf,
@@ -363,12 +502,36 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         joint_constraints=joint_constraints,
     )
 
-    mapper = IncrementalPoseMapper(scale=args.scale, allowed_hands=hands)
+    mapper = IncrementalPoseMapper(
+        scale=args.scale,
+        allowed_hands=hands,
+        rotation_vr_to_base=mapper_rotation,
+    )
     session = ArmTeleopSession(ik_solver=ik, mapper=mapper, check_collision=not args.no_collision)
 
     model = ik.reduced_robot.model
     data = ik.reduced_robot.data
-    q_home = pin.neutral(model)
+    if home_q_deg is not None:
+        home_q_rad = np.deg2rad(home_q_deg)
+        if home_q_rad.shape[0] != model.nq:
+            raise SystemExit(f"home_q_deg 长度需为 {model.nq}，实际 {home_q_rad.shape[0]}")
+        lower = model.lowerPositionLimit
+        upper = model.upperPositionLimit
+        # Clamp inside URDF limits to避免边界触发不可行
+        home_q_rad = np.clip(home_q_rad, lower + 1e-6, upper - 1e-6)
+        logging.getLogger(__name__).info(
+            "应用初始关节角(度)：%s",
+            ", ".join(f"{val:.2f}" for val in home_q_deg),
+        )
+        if np.any(home_q_rad < lower) or np.any(home_q_rad > upper):
+            logging.getLogger(__name__).warning("home_q_deg 超出 URDF 关节范围，将继续尝试使用")
+        ik.set_seed(home_q_rad)
+        ik.q_last = home_q_rad.copy()
+        q_reference = home_q_rad
+    else:
+        q_reference = pin.neutral(model)
+
+    q_home = q_reference.copy()
     pin.forwardKinematics(model, data, q_home)
     pin.updateFramePlacements(model, data)
     ee_id = model.getFrameId("ee")
@@ -384,6 +547,19 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         reference_translation=base_pose.translation,
         reference_rotation=base_pose.rotation,
     )
+
+    if ik.use_meshcat:
+        mount_hom = np.eye(4)
+        mount_hom[:3, :3] = mount_rotation
+        mount_hom[:3, 3] = mount_offset
+        try:
+            ik.vis.viewer["pinocchio"].set_transform(mount_hom)
+            ik.vis.display(q_reference)
+            if hasattr(ik, "_meshcat_base_transform"):
+                ik._meshcat_base_transform = mount_hom
+        except Exception:
+            logging.getLogger(__name__).warning("Meshcat 根节点变换设置失败，继续使用默认朝向")
+
     return session, pipeline
 
 

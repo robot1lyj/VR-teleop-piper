@@ -145,6 +145,12 @@ python scripts/run_vr_meshcat.py \
   [--no-meshcat] [--no-collision]
 ```
 
+若需验证 30° 安装配置，可直接：
+
+```bash
+python scripts/run_vr_meshcat.py --config configs/run_vr_meshcat_side30.json --replay output.jsonl --replay-speed 1.0
+```
+
 - `--replay-speed` 用于加速 / 减速回放（例如 0.5 表示慢放，2.0 表示倍速）。
 - 配合 `--replay-loop` 可以循环播放，便于长时间观察 Meshcat 中的末端路径。
 - 回放期间同样会输出 IK 结果和目标位姿，验证计算链路是否稳定。
@@ -170,6 +176,9 @@ python scripts/run_vr_meshcat.py \
 | `--swivel-range-deg` | `run_vr_meshcat.py` | 肘部 swivel 角硬约束（度），以中立姿态为零点，40 表示允许 ±40°，0 关闭。 |
 | `--trust-region` | `run_vr_meshcat.py` | 单步信赖域（弧度），限制 `q` 偏离上一帧的幅度，可填标量或 6 元列表。 |
 | `--joint-constraints` | `run_vr_meshcat.py` | 以 JSON 描述额外的关节硬约束/步长限制，如 `{"step_limits_deg":{"joint4":15}}`，命令行优先生效。 |
+| `--mount-rpy-deg` | `run_vr_meshcat.py` | 基座安装姿态（roll、pitch、yaw，单位度），如 `0,30,0`；用于兼容侧装等朝向变化。 |
+| `--mount-offset` | `run_vr_meshcat.py` | 基座在 Meshcat 中的平移偏置（米），如 `0,0,0.15`，用于虚拟抬升/平移模型。 |
+| `--home-q-deg` | `run_vr_meshcat.py` | 自定义初始关节角（度），按 joint1→jointN 顺序提供；Meshcat 与 IK 将以此姿态为基准。 |
 
 ### 配置文件说明
 
@@ -177,7 +186,41 @@ python scripts/run_vr_meshcat.py \
 - 支持直接修改布尔值（如 `"no_stun": true`）、数值，以及长度为 6 的关节权重列表，例如 `"joint_reg_weights": [5,1,1,5,1,1]`、`"joint_smooth_weights": [8,1,1,8,1,1]`。
 - 新增 `swivel_range_deg`（肘部旋转硬约束范围，单位度，以中立姿态为零点）与 `trust_region`（逐关节单步上限，单位弧度）字段，可直接在 JSON 中调整，脚本会自动加载。
 - `joint_constraints` 支持 `hard_limits` / `hard_limits_deg`（收窄物理范围）与 `step_limits` / `step_limits_deg`（限制单步改变量），当前默认只对 `joint4` 生效，可按需扩展到其他关节；如需滤波步长中心，可设置 `filter_alpha`（0-1 之间）。
+- `mount_rpy_deg` 使用 Roll-Pitch-Yaw（XYZ 顺序，单位度）描述机械臂基座相对于默认水平姿态的安装角；脚本会自动将 VR 坐标系、IK 基座与 Meshcat 同步旋转，无需修改 URDF。
+- `mount_offset` 提供基座位置平移（米），常用于 Meshcat 中模拟台面高度差或相机视角调整，不影响 IK 参考坐标系。
+- `home_q_deg` 以度为单位描述初始关节姿态（按 joint1→jointN 排序）。填写后脚本会：① 用该姿态 warm-start IK；② 以其末端位姿作为增量参考；③ Meshcat 初始显示真实姿态。若角度超出 URDF 限制会给出警告，可结合 `trust_region` / `joint_constraints` 放宽可行区间。
 - 命令行参数始终优先生效，便于快速对比不同配置；若想切换成另一套完整配置，可复制该文件并通过 `--config path/to/file.json` 指定。
+
+仓库额外提供 `configs/run_vr_meshcat_side30.json` 作为完整字段示例：在默认参数基础上覆写安装姿态、平移偏置与真实关节初始角，便于直接测试 30°（或自行调整）安装，不需要手动补齐缺失字段。
+
+示例：水平正装使用默认配置，若需要测试绕 X 轴 30° 的侧装，可直接：
+
+```bash
+# 水平安装（默认）
+python scripts/run_vr_meshcat.py
+
+# 侧装 30° 配置
+python scripts/run_vr_meshcat.py --config configs/run_vr_meshcat_side30.json
+```
+
+如需自定义姿态，可修改 JSON 中的 `mount_rpy_deg` / `mount_offset` / `home_q_deg`（推荐复制 `configs/run_vr_meshcat_side30.json` 再修改），或在命令行追加 `--mount-rpy-deg 0,45,0 --mount-offset 0,0,0.2 --home-q-deg -88,157,-150,-100,12,-172` 等覆盖参数。
+
+### 安装姿态快速预览
+
+使用 `scripts/preview_mount_pose.py` 可以在 Meshcat 中直接查看当前配置对应的基座朝向：
+
+```bash
+# 读取默认配置
+python scripts/preview_mount_pose.py
+
+# 指定侧装配置
+python scripts/preview_mount_pose.py --config configs/run_vr_meshcat_side30.json
+
+# 直接覆盖安装角/平移/初始关节角
+python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0.2 --home-q-deg -88,157,-150,-100,12,-172
+```
+
+脚本会加载配置中的 URDF、`mount_rpy_deg`、`mount_offset` 与 `home_q_deg`，并在 Meshcat 中同步更新基座姿态和平移以及初始关节角，便于在不改 URDF 的情况下核对不同安装方式或零位。
 
 ### 常见排查
 

@@ -13,17 +13,19 @@
   "replay": "output.jsonl",
   "replay_speed": 1.0,
   "replay_loop": false,
-  "mount_rpy_deg": [0.0, 0.0, 0.0],
-  "mount_offset": [0.0, 0.0, 0.0],
-  "home_q_deg": null,
+  "mount_rpy_deg": [60.0, 0.0, 0.0],
+  "mount_offset": [0.0, 0.0, 1],
+  "home_q_deg": [-50, 150.0, -123.0, -100.0, -28.0, -80.0],
   "joint_reg_weights": [5.0, 1.0, 1.0, 5.0, 1.0, 1.0],
   "joint_smooth_weights": [8.0, 1.0, 1.0, 8.0, 1.0, 1.0],
   "swivel_range_deg": 20,
-  "trust_region": [0.05, 0.12, 0.12, 0.02, 0.12, 0.20],
+  "trust_region": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
   "joint_constraints": {
     "step_limits_deg": {
-      "joint4": 5.0
+      "joint4": 20
     },
-    "hard_limits_deg": { "joint4": [-40.0, 40.0] }
+    "hard_limits_deg": {
+      "joint4": [-120, -80]
+    }
   }
 }
