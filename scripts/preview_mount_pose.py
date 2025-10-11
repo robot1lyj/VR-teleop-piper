@@ -18,7 +18,7 @@ DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "run_vr_meshcat.json"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from robot.ik import ArmIK  # noqa: E402  # pylint: disable=wrong-import-position
+from robot.ik import MeshcatArmIK  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 def _ensure_path(path_str: str | pathlib.Path) -> pathlib.Path:
@@ -149,7 +149,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """主逻辑：加载配置 -> 创建 ArmIK（启用 Meshcat）-> 应用安装姿态并展示。"""
+    """主逻辑：加载配置 -> 创建 Meshcat IK -> 应用安装姿态并展示。"""
 
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -184,8 +184,8 @@ def main() -> None:
     else:
         logger.info("初始关节角(度): %s", ", ".join(f"{val:.2f}" for val in home_q_deg))
 
-    # ArmIK 默认会创建 Meshcat 可视化器并显示中立位姿
-    ik = ArmIK(urdf_path=str(urdf_path), use_meshcat=True)
+    # Meshcat IK 会创建可视化器并显示中立位姿
+    ik = MeshcatArmIK(urdf_path=str(urdf_path), enable_viewer=True)
 
     home_q_rad: np.ndarray | None = None
     if home_q_deg is not None:
@@ -198,18 +198,13 @@ def main() -> None:
             ik.set_seed(home_q_rad)
             ik.q_last = home_q_rad.copy()
 
-    if ik.use_meshcat:
+    if getattr(ik, "use_meshcat", False):
         rotation = _rotation_from_rpy_deg(mount_rpy_deg)
-        mount_hom = np.eye(4)
-        mount_hom[:3, :3] = rotation
-        if mount_offset is not None:
-            mount_hom[:3, 3] = mount_offset
+        translation = mount_offset if mount_offset is not None else np.zeros(3)
         try:
-            ik.vis.viewer["pinocchio"].set_transform(mount_hom)
+            ik.set_visual_base_transform(rotation, translation)
             if home_q_rad is not None:
-                ik.vis.display(home_q_rad)
-            if hasattr(ik, "_meshcat_base_transform"):
-                ik._meshcat_base_transform = mount_hom
+                ik.refresh_visual(home_q_rad)
             logger.info("Meshcat 已应用安装姿态/初始关节角")
         except Exception as exc:  # pragma: no cover - Meshcat 异常仅用于调试
             logger.warning("Meshcat 根节点变换设置失败: %s", exc)

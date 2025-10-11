@@ -20,7 +20,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from webrtc_endpoint import VRWebRTCServer
-from robot.ik import ArmIK
+from robot.ik import MeshcatArmIK
 from robot.teleop import ArmTeleopSession, IncrementalPoseMapper
 from robot.teleop.incremental_mapper import R_BV_DEFAULT
 
@@ -489,9 +489,9 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
 
     mapper_rotation = mount_rotation.T @ R_BV_DEFAULT
 
-    ik = ArmIK(
+    ik = MeshcatArmIK(
         urdf_path=args.urdf,
-        use_meshcat=not args.no_meshcat,
+        enable_viewer=not args.no_meshcat,
         smooth_weight=0.05,
         position_weight=20.0,
         orientation_weight=20.0,
@@ -536,7 +536,7 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
     pin.updateFramePlacements(model, data)
     ee_id = model.getFrameId("ee")
     if ee_id < 0 or ee_id >= len(data.oMf):
-        raise RuntimeError("无法找到名为 'ee' 的末端 Frame，请确认 ArmIK 初始化已刷新 model/data")
+        raise RuntimeError("无法找到名为 'ee' 的末端 Frame，请确认 IK 初始化已刷新 model/data")
     base_pose = data.oMf[ee_id]
     for hand in hands:
         session.set_reference_pose(hand, base_pose.translation, base_pose.rotation)
@@ -548,16 +548,11 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         reference_rotation=base_pose.rotation,
     )
 
-    if ik.use_meshcat:
-        mount_hom = np.eye(4)
-        mount_hom[:3, :3] = mount_rotation
-        mount_hom[:3, 3] = mount_offset
+    if getattr(ik, "use_meshcat", False):
         try:
-            ik.vis.viewer["pinocchio"].set_transform(mount_hom)
-            ik.vis.display(q_reference)
-            if hasattr(ik, "_meshcat_base_transform"):
-                ik._meshcat_base_transform = mount_hom
-        except Exception:
+            ik.set_visual_base_transform(mount_rotation, mount_offset)
+            ik.refresh_visual(q_reference)
+        except Exception:  # pylint: disable=broad-except
             logging.getLogger(__name__).warning("Meshcat 根节点变换设置失败，继续使用默认朝向")
 
     return session, pipeline

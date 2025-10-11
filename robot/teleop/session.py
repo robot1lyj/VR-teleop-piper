@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pinocchio as pin
 
-from robot.ik import ArmIK
+from robot.ik import BaseArmIK
 
 from .incremental_mapper import IncrementalPoseMapper, TeleopGoal
 
@@ -30,7 +30,7 @@ class ArmTeleopSession:
 
     def __init__(
         self,
-        ik_solver: ArmIK,
+        ik_solver: BaseArmIK,
         mapper: Optional[IncrementalPoseMapper] = None,
         check_collision: bool = True,
     ) -> None:
