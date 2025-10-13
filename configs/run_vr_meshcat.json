@@ -3,7 +3,7 @@
   "host": "0.0.0.0",
   "port": 8442,
   "channel": "controller",
-  "scale": 1.0,
+  "scale": 2.0,
   "no_meshcat": false,
   "hands": "right",
   "no_stun": true,
