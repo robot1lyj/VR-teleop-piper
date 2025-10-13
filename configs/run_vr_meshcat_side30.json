@@ -10,7 +10,7 @@
   "stun": [],
   "log_level": "info",
   "no_collision": true,
-  "replay": "output.jsonl",
+  "replay": "",
   "replay_speed": 1.0,
   "replay_loop": false,
   "mount_rpy_deg": [60.0, 0.0, 0.0],

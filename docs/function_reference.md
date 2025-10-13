@@ -7,7 +7,7 @@
 - `JointConstraintManager._build_joint_index_map(model)`：根据 Pinocchio 模型生成关节索引映射，支持 `joint4` 这类名称引用。
 
 ## robot/ik/base_solver.py
-- `BaseArmIK.__init__(..., swivel_limit, trust_region, joint_constraints, ...)`：构建 Pinocchio + CasADi 的核心 IK 求解器；`swivel_limit` 为肘部 ±范围（弧度），`trust_region` 控制单步最大改变量，`joint_constraints` 接受与配置文件一致的字典。
+- `BaseArmIK.__init__(..., swivel_limit, trust_region, joint_constraints, ...)`：构建 Pinocchio + CasADi 的核心 IK 求解器；`swivel_limit` 为肘部 ±范围（弧度），`trust_region` 控制单步最大改变量，`joint_constraints` 接受与配置文件一致的字典。默认的末端 Frame `ee` 先绕 Y 轴 -90°，再沿旋转后 `+X` 偏移 0.13 m（距离 130 mm）。
 - `BaseArmIK.solve(target, check_collision)`：给定 `pin.SE3` 目标求解六关节角度，内部调用 `JointConstraintManager` 调整步长/范围，并在成功时更新 `q_last`、`q_seed`。
 - `BaseArmIK._sanitize_trust_region(region, size)`：把标量/列表转成长度为关节数的数组，单位弧度。
 - `BaseArmIK._sanitize_swivel_limit(limit)`：将肘部范围裁剪到 `(0, π]`；`None` 表示关闭。
