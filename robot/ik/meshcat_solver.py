@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Iterable, Optional, Tuple, Dict, Any
 import numpy as np
+import pinocchio as pin
 
 from .base_solver import BaseArmIK
 
@@ -63,21 +64,52 @@ class MeshcatArmIK(BaseArmIK):
         self.use_meshcat = bool(enable_viewer and _HAS_MESHCAT)
         self.vis: Optional[MeshcatVisualizer] = None
         self._meshcat_base_transform = np.eye(4)
+        self._full_config_template = pin.neutral(self.robot.model)
+
+        gripper_indices: list[int] = []
+        gripper_lower: list[float] = []
+        gripper_upper: list[float] = []
+        for joint_name in ("joint7", "joint8"):
+            joint_id = self.robot.model.getJointId(joint_name)
+            if joint_id <= 0:
+                raise ValueError(f"未在模型中找到 {joint_name}")
+            joint = self.robot.model.joints[joint_id]
+            if joint.nq != 1:
+                raise ValueError(f"手爪关节 {joint_name} 的自由度数量异常: {joint.nq}")
+            idx_q = joint.idx_q
+            gripper_indices.append(idx_q)
+            gripper_lower.append(self.robot.model.lowerPositionLimit[idx_q])
+            gripper_upper.append(self.robot.model.upperPositionLimit[idx_q])
+
+        self._gripper_joint_indices = np.array(gripper_indices, dtype=int)
+        self._gripper_lower = np.array(gripper_lower, dtype=float)
+        self._gripper_upper = np.array(gripper_upper, dtype=float)
+
+        open_targets = []
+        for lower, upper in zip(self._gripper_lower, self._gripper_upper):
+            if abs(upper) >= abs(lower):
+                open_targets.append(0.9 * upper)
+            else:
+                open_targets.append(0.9 * lower)
+        self._gripper_closed_config = np.zeros_like(self._gripper_lower)
+        self._gripper_open_config = np.clip(np.array(open_targets, dtype=float), self._gripper_lower, self._gripper_upper)
+        self._current_gripper_q = self._gripper_closed_config.copy()
+        self._ee_frame_id_visual = self.robot.model.getFrameId("ee")
 
         if self.use_meshcat:
             assert MeshcatVisualizer is not None
             try:
                 self.vis = MeshcatVisualizer(
-                    self.reduced_robot.model,
-                    self.reduced_robot.collision_model,
-                    self.reduced_robot.visual_model,
+                    self.robot.model,
+                    self.robot.collision_model,
+                    self.robot.visual_model,
                 )
                 self.vis.initViewer(open=open_viewer)
                 self.vis.loadViewerModel("pinocchio")
 
-                ee_id = self.reduced_robot.model.getFrameId("ee")
-                self.vis.displayFrames(True, frame_ids=[ee_id], axis_length=0.12, axis_width=5)
-                self.vis.display(self.q_seed)
+                if self._ee_frame_id_visual >= 0:
+                    self.vis.displayFrames(True, frame_ids=[self._ee_frame_id_visual], axis_length=0.12, axis_width=5)
+                self.vis.display(self._compose_full_q(self.q_seed))
 
                 frame_viz_name = "ee_target"
                 axis_positions = np.array(
@@ -118,7 +150,7 @@ class MeshcatArmIK(BaseArmIK):
         if not self.use_meshcat or self.vis is None:
             return
         try:
-            self.vis.display(q)
+            self.vis.display(self._compose_full_q(q))
         except Exception:  # pylint: disable=broad-except
             pass
 
@@ -149,11 +181,36 @@ class MeshcatArmIK(BaseArmIK):
 
         if not self.use_meshcat or self.vis is None:
             return
-        pose = self.q_last if q is None else np.asarray(q, dtype=float).reshape(-1)
+        pose = self._compose_full_q(self.q_last if q is None else np.asarray(q, dtype=float).reshape(-1))
         try:
             self.vis.display(pose)
         except Exception:  # pylint: disable=broad-except
             logging.getLogger(__name__).warning("Meshcat 刷新失败")
+
+    def set_gripper_state(self, closed: bool) -> None:
+        super().set_gripper_state(closed)
+        target = self._gripper_closed_config if closed else self._gripper_open_config
+        if np.allclose(self._current_gripper_q, target, atol=1e-4):
+            return
+        self._current_gripper_q = target.copy()
+        if not self.use_meshcat or self.vis is None:
+            return
+        try:
+            self.vis.display(self._compose_full_q(self.q_last))
+        except Exception:  # pylint: disable=broad-except
+            logging.getLogger(__name__).debug("Meshcat 手爪刷新失败", exc_info=False)
+
+    def _compose_full_q(
+        self,
+        q: Optional[np.ndarray] = None,
+        gripper: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        full_q = self._full_config_template.copy()
+        q_source = self.q_last if q is None else np.asarray(q, dtype=float).reshape(-1)
+        full_q[: self.reduced_robot.model.nq] = q_source
+        gripper_cfg = self._current_gripper_q if gripper is None else np.asarray(gripper, dtype=float).reshape(-1)
+        full_q[self._gripper_joint_indices] = np.clip(gripper_cfg, self._gripper_lower, self._gripper_upper)
+        return full_q
 
 
 __all__ = ["MeshcatArmIK"]

@@ -70,6 +70,7 @@ class ArmTeleopSession:
         results: List[TeleopResult] = []
 
         for goal in goals:
+            self.ik_solver.set_gripper_state(goal.gripper_closed)
             target = pin.SE3(goal.rotation, goal.position)
             joints, success, info = self.ik_solver.solve(target, check_collision=self.check_collision)
             if isinstance(joints, np.ndarray):

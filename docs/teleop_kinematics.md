@@ -53,7 +53,7 @@
    其中 `s = self.scale` 是增益系数（默认 1.0）。
 
 5. **握持/扳机状态**
-   - 扳机值通过 `controller.trigger_active` 映射为 `TeleopGoal.gripper_closed`，IK 求解器不直接处理，但上层可用于手爪命令。
+   - 扳机值通过 `controller.trigger_active` 映射为 `TeleopGoal.gripper_closed`，`ArmTeleopSession` 会把该状态传给 IK；在 Meshcat 模式下会直接驱动模型手爪开闭，其他上层也可据此发送真实手爪命令。
 
 ## IK 目标帧来源
 - `ArmTeleopSession` 在 `handle_vr_payload` 中将 `goal.position` / `goal.rotation` 打包为 `pin.SE3(goal.rotation, goal.position)`。

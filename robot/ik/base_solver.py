@@ -118,6 +118,16 @@ class BaseArmIK:
                 pin.FrameType.OP_FRAME,
             )
         )
+        if not self.robot.model.existFrame("ee"):
+            self.robot.model.addFrame(
+                pin.Frame(
+                    "ee",
+                    self.robot.model.getJointId(add_ee_on_joint),
+                    pin.SE3(ee_quat, np.array(add_ee_translation, dtype=float)),
+                    pin.FrameType.OP_FRAME,
+                )
+            )
+        self.robot.data = self.robot.model.createData()
         self.reduced_robot.data = self.reduced_robot.model.createData()
 
         # 碰撞模型（子类可选择忽略）
@@ -136,6 +146,7 @@ class BaseArmIK:
         q_neutral = pin.neutral(self.reduced_robot.model)
         self.q_seed = q_neutral.copy()
         self.q_last = q_neutral.copy()
+        self._gripper_closed_state: bool = True
 
         self._ref_elbow_normal: Optional[np.ndarray] = None
         self._ref_elbow_axis: Optional[np.ndarray] = None
@@ -333,6 +344,11 @@ class BaseArmIK:
         if q_arr.shape[0] != self.reduced_robot.model.nq:
             raise ValueError("seed dim mismatch")
         self.q_seed = q_arr.copy()
+
+    def set_gripper_state(self, closed: bool) -> None:
+        """基类仅记录闭合状态，具体行为由派生类实现。"""
+
+        self._gripper_closed_state = bool(closed)
 
     def solve(self, target: pin.SE3 | np.ndarray, check_collision: bool = True) -> Tuple[Optional[np.ndarray], bool, str]:
         if isinstance(target, pin.SE3):
