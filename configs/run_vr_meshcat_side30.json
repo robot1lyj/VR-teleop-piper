@@ -3,7 +3,7 @@
   "host": "0.0.0.0",
   "port": 8442,
   "channel": "controller",
-  "scale": 1.0,
+  "scale": 2.0,
   "no_meshcat": false,
   "hands": "right",
   "no_stun": true,
@@ -15,11 +15,11 @@
   "replay_loop": false,
   "mount_rpy_deg": [60.0, 0.0, 0.0],
   "mount_offset": [0.0, 0.0, 1],
-  "home_q_deg": [-50, 150.0, -123.0, -100.0, -28.0, -80.0],
+  "home_q_deg": [-50, 150.0, -123.0, -100.0, -28.0, 0],
   "joint_reg_weights": [5.0, 1.0, 1.0, 5.0, 1.0, 1.0],
   "joint_smooth_weights": [8.0, 1.0, 1.0, 8.0, 1.0, 1.0],
-  "swivel_range_deg": 20,
-  "trust_region": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+  "swivel_range_deg": 30,
+  "trust_region": [0.5, 0.35, 0.5, 0.5, 0.5, 0.5],
   "joint_constraints": {
     "step_limits_deg": {
       "joint4": 20

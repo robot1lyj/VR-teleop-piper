@@ -121,6 +121,8 @@ class IncrementalPoseMapper:
             "right": ControllerState("right"),
         }
         self.reference_poses: Dict[str, Dict[str, np.ndarray]] = {}
+        # 每只手柄握持时缓存一次局部坐标映射，避免重复计算。
+        self.controller_frames: Dict[str, Dict[str, np.ndarray]] = {}
 
     def set_reference_pose(self, hand: str, position: np.ndarray, rotation: np.ndarray) -> None:
         """记录机械臂当前末端位姿，作为增量累加的基准。"""
@@ -133,11 +135,13 @@ class IncrementalPoseMapper:
         pos = np.asarray(position, dtype=float).reshape(3)
         rot = np.asarray(rotation, dtype=float).reshape(3, 3)
         self.reference_poses[hand] = {"position": pos, "rotation": rot}
+        self.controller_frames.pop(hand, None)
 
     def clear_reference_pose(self, hand: str) -> None:
         """当控制权移交或重置时移除参考位姿。"""
 
         self.reference_poses.pop(hand, None)
+        self.controller_frames.pop(hand, None)
         controller = self.controllers.get(hand)
         if controller:
             controller.reset_grip()
@@ -166,6 +170,29 @@ class IncrementalPoseMapper:
 
         return goals
 
+    def _cache_controller_frame(
+        self,
+        hand: str,
+        reference: Dict[str, np.ndarray],
+        origin_quaternion: Optional[np.ndarray],
+    ) -> None:
+        """基于当前参考姿态与手柄零位四元数缓存局部映射。"""
+
+        reference_rotation = reference["rotation"].copy()
+        vr_origin_matrix = np.eye(3)
+        if origin_quaternion is not None:
+            vr_origin_matrix = _quaternion_to_matrix(origin_quaternion)
+
+        ctrl_to_base = self.rotation_vr_to_base @ vr_origin_matrix
+        ctrl_to_ee = reference_rotation.T @ ctrl_to_base
+        self.controller_frames[hand] = {
+            "reference_rotation": reference_rotation,
+            "vr_origin_matrix": vr_origin_matrix,
+            "vr_origin_matrix_T": vr_origin_matrix.T,
+            "ctrl_to_ee": ctrl_to_ee,
+            "ctrl_to_ee_T": ctrl_to_ee.T,
+        }
+
     def _handle_single(self, hand: str, payload: Dict[str, Any]) -> Optional[TeleopGoal]:
         """处理单个手柄的增量计算。"""
 
@@ -187,6 +214,7 @@ class IncrementalPoseMapper:
         if not grip_active:
             if controller.grip_active:
                 controller.reset_grip()
+                self.controller_frames.pop(hand, None)
             return None
 
         position_vec = np.array(
@@ -207,10 +235,17 @@ class IncrementalPoseMapper:
             else:
                 controller.origin_quaternion = None
                 controller.accumulated_quaternion = None
+            self._cache_controller_frame(hand, reference, controller.origin_quaternion)
             return None
 
         if quaternion_payload:
-            controller.accumulated_quaternion = _quaternion_from_payload(quaternion_payload)
+            quaternion_now = _quaternion_from_payload(quaternion_payload)
+            controller.accumulated_quaternion = quaternion_now
+            if controller.origin_quaternion is None:
+                controller.origin_quaternion = quaternion_now
+                self._cache_controller_frame(hand, reference, controller.origin_quaternion)
+            elif hand not in self.controller_frames:
+                self._cache_controller_frame(hand, reference, controller.origin_quaternion)
 
         origin_position = controller.origin_position
         if origin_position is None:
@@ -220,7 +255,22 @@ class IncrementalPoseMapper:
         goal_position = reference["position"] + self.scale * delta_base
 
         goal_rotation = reference["rotation"]
-        if controller.accumulated_quaternion is not None and controller.origin_quaternion is not None:
+        frame_cache = self.controller_frames.get(hand)
+        if (
+            frame_cache
+            and controller.accumulated_quaternion is not None
+            and controller.origin_quaternion is not None
+            and "vr_origin_matrix" in frame_cache
+        ):
+            vr_now = _quaternion_to_matrix(controller.accumulated_quaternion)
+            vr_origin_matrix_T = frame_cache["vr_origin_matrix_T"]
+            ctrl_rel_local = vr_origin_matrix_T @ vr_now
+            ctrl_to_ee = frame_cache["ctrl_to_ee"]
+            ctrl_to_ee_T = frame_cache["ctrl_to_ee_T"]
+            rel_in_ee = ctrl_to_ee @ ctrl_rel_local @ ctrl_to_ee_T
+            reference_rotation = frame_cache["reference_rotation"]
+            goal_rotation = reference_rotation @ rel_in_ee
+        elif controller.accumulated_quaternion is not None and controller.origin_quaternion is not None:
             q_now = _normalize_quaternion(controller.accumulated_quaternion)
             q_origin = _normalize_quaternion(controller.origin_quaternion)
             q_rel = _quaternion_multiply(q_now, _quaternion_conjugate(q_origin))
