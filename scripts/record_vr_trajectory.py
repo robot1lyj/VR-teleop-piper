@@ -17,7 +17,7 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from webrtc_endpoint import VRWebRTCServer
+from vr_runtime.webrtc_endpoint import VRWebRTCServer
 
 
 class TrajectoryRecorder:

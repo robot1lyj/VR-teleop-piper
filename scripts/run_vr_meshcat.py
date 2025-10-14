@@ -19,7 +19,7 @@ DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "run_vr_meshcat.json"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from webrtc_endpoint import VRWebRTCServer
+from vr_runtime.webrtc_endpoint import VRWebRTCServer
 from robot.ik import MeshcatArmIK
 from robot.teleop import ArmTeleopSession, IncrementalPoseMapper
 from robot.teleop.incremental_mapper import R_BV_DEFAULT

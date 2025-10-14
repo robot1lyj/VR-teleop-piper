@@ -5,7 +5,7 @@
 ## 1. 整体数据链路回顾
 
 ```
-VR 头显/浏览器 ── WebRTC DataChannel ──▶ controller_stream.py
+VR 头显/浏览器 ── WebRTC DataChannel ──▶ vr_runtime/controller_pipeline.py
                                                   │
                                                   ▼
                                    robot/teleop/ArmTeleopSession
@@ -90,7 +90,7 @@ VR 头显/浏览器 ── WebRTC DataChannel ──▶ controller_stream.py
 ```python
 from robot.teleop import ArmTeleopSession, IncrementalPoseMapper
 from robot.ik import BaseArmIK
-from webrtc_endpoint import VRWebRTCServer
+from vr_runtime.webrtc_endpoint import VRWebRTCServer
 
 ik = BaseArmIK(
     urdf_path="piper_description/urdf/real_arm.urdf",
@@ -163,4 +163,3 @@ def handle_results(results):
 - **ROS/工业现场集成**：可将 `TeleopResult` 发布为 ROS 话题，或映射成 Modbus/工业以太网指令，与现有 PLC/机器人控制器对接。
 
 > **总结**：真实机器人适配的关键是“对齐参考 + 限制速度 + 逐步验证”。把 VR 管线当成笛卡尔指令生成器，先在 Meshcat 中确保姿态正确，再小心地把同样的 IK 结果发给实体即可。若严格按照上面的步骤逐项验证，便能将仓库的基线方案安全地迁移到真实机械臂上。
-

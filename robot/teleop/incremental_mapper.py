@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from controller_state import ControllerState
+from vr_runtime.controller_state import ControllerState
 
 # VR 世界坐标系 -> 机械臂基座系的固定旋转矩阵
 R_BV_DEFAULT = np.array(

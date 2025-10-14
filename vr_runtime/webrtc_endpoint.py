@@ -22,10 +22,7 @@ from aiortc import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
-    try:
-        from .controller_stream import ControllerPipeline
-    except ImportError:
-        from controller_stream import ControllerPipeline
+    from .controller_pipeline import ControllerPipeline
 
 logger = logging.getLogger(__name__)
 

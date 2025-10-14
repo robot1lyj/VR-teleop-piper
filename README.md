@@ -1,15 +1,22 @@
 # VR-New 模块概览（WebRTC 版）
 
 ```
-├── __init__.py                # 暴露 run_vr_controller_stream 入口
-├── controller_state.py        # 单手柄状态结构，记录握持/扳机/姿态等信息
-├── controller_stream.py       # WebRTC 信令入口，封装姿态处理管线与 CLI
-├── webrtc_endpoint.py         # WebSocket 信令 + aiortc DataChannel 服务端
-└── web-ui/                    # 浏览器侧 A-Frame 客户端
-    ├── index.html             # 信令地址输入、状态显示、A-Frame 场景
-    ├── interface.js           # UI 交互与日志面板
-    ├── styles.css             # 深色主题样式
-    └── vr_app.js              # WebRTCBridge 与手柄数据采集
+├── __init__.py                    # 暴露 run_vr_controller_stream 入口
+├── vr_runtime/                    # VR 采集/信令层（与机器人逻辑解耦）
+│   ├── __init__.py                # 导出 ControllerPipeline / VRWebRTCServer
+│   ├── controller_pipeline.py     # WebRTC 信令 CLI + ControllerPipeline 实现
+│   ├── controller_state.py        # 单手柄状态结构，记录握持/扳机/姿态等信息
+│   ├── webrtc_endpoint.py         # WebSocket 信令 + aiortc DataChannel 服务端
+│   └── common/
+│       └── math.py                # （占位）通用四元数 / 姿态工具
+├── robot/                         # VR 目标 → 机械臂运动学
+│   ├── teleop/                    # 增量映射 + Teleop 会话
+│   └── ik/                        # IK 求解器
+└── web-ui/                        # 浏览器侧 A-Frame 客户端
+    ├── index.html                 # 信令地址输入、状态显示、A-Frame 场景
+    ├── interface.js               # UI 交互与日志面板
+    ├── styles.css                 # 深色主题样式
+    └── vr_app.js                  # WebRTCBridge 与手柄数据采集
 ```
 
 ## 数据流
@@ -19,7 +26,7 @@
         │ 信令：WebSocket (offer/answer/ICE)
         │ 数据：WebRTC DataChannel(JSON，姿态 50 Hz)
         ▼
-  controller_stream.py + webrtc_endpoint.py
+  vr_runtime/controller_pipeline.py + vr_runtime/webrtc_endpoint.py
         │ ControllerPipeline 解析 -> 更新 ControllerState
         ▼
       标准输出 / 后续机器人控制模块
@@ -39,7 +46,7 @@
 
 2. **启动信令 + DataChannel 服务**（局域网可关闭 STUN）：
    ```bash
-   PYTHONPATH=. python -m controller_stream \
+   PYTHONPATH=. python -m vr_runtime.controller_pipeline \
      --host 0.0.0.0 \
      --port 8442 \
      --no-stun \
