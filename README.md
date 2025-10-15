@@ -234,3 +234,51 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
 - **Meshcat 页面空白**：重启脚本并确保浏览器访问的是最新的 URL；如仍失败，可单独启动 `meshcat-server` 并设置环境变量以复用已有服务端口。
 - **IK 频繁失败**：降低 `--scale` 或调整参考姿态，确保目标位姿落在 Piper 的可达空间；必要时暂时关闭 `check_collision`。
 - **轨迹文件过大**：录制脚本默认逐帧 flush，可改为运行结束后手动压缩，或在后续处理管线中按时间段切片。
+
+
+## 真实机器人接入（Piper）
+
+### 依赖与准备
+
+- 安装 Piper 官方 SDK（示例：`pip3 install piper_sdk`，具体包名以厂家发布为准），并确保已激活对应的 Python 环境。
+- 根据 `robot/real/piper/can_config.sh` 中的要求准备系统工具：`sudo apt install ethtool can-utils`，并确认内核已加载 `gs_usb` 驱动。
+- VR 端保持与仿真一致的 WebRTC/遥操作流程；本节仅描述额外的硬件 bring-up 步骤。
+
+### CAN 接口命名与激活
+
+- `robot/real/piper/can_config.sh` 支持单/双 CAN 模块自动重命名与设定波特率，修改脚本顶部的 `EXPECTED_CAN_COUNT`、`USB_PORTS` 后执行：
+  ```bash
+  sudo bash robot/real/piper/can_config.sh
+  ```
+- 若需要在插拔时自动寻找指定 USB 口，可改用 `robot/real/piper/can_find_and_config.sh`：
+  ```bash
+  sudo bash robot/real/piper/can_find_and_config.sh can_right 1000000 1-10.2:1.0
+  ```
+  其中第三个参数为 `ethtool -i canX` 获得的 `bus-info` 字段。
+- 常见辅助脚本：`can_activate.sh`（单路激活）、`can_muti_activate.sh`（批量启用）、`find_all_can_port.sh`（列出当前可见的 USB 地址）。
+
+### 控制封装入口
+
+- `robot/real/piper.py` 提供 `PiperMotorsBus` 类，对 `C_PiperInterface_V2` 进行二次封装，核心方法如下：
+  - `connect(enable: bool = True)`：上电或下电六轴与夹爪，内部自检 5 s 超时并记录返回状态。
+  - `apply_calibration()`：将关节移动到 `init_joint_position` 设定的初始角。
+  - `write(target_joint: list)`：发送 6 轴 + 夹爪目标，单位按注释为弧度/米；内部会限制 4 号关节与夹爪的安全范围。
+  - `read()`：读取当前关节与夹爪状态，返回单位为 0.001°。
+  - `safe_disconnect()`：在下电前回到 `safe_disable_position`。
+- 使用前请在 `configs/piper.json` 中将 `can_name`、`init_joint_position` 等参数改成现场的实际配置。建议在业务逻辑中包装 try/finally，确保异常时调用 `safe_disconnect()` 与 `connect(False)`。
+
+### 上位机自检脚本
+
+- 位置归零、点动示例：`robot/real/piper/piper_ctrl_go_zero.py`、`robot/real/piper/piper_ctrl_right.py`。
+- 状态读取：`robot/real/piper/piper_read_joint_state.py`、`robot/real/piper/piper_read_status.py`、`robot/real/piper/piper_read_fk.py`。
+- 夹爪工具：`robot/real/piper/piper_set_gripper_zero.py`、`robot/real/piper/piper_read_gripper_status.py`。
+- 这些脚本均假设先执行 CAN 配置，并在运行前安装 Piper SDK。可在 `python -m robot.real.piper` 环境中逐一验证硬件响应。
+
+### 与 VR 管线集成
+
+- 真实硬件阶段依旧复用 `ArmTeleopSession` / `IncrementalPoseMapper` 生成的关节解；将 IK 输出的 `q` 直接传入 `PiperMotorsBus.write` 即可。
+- 推荐流程：
+  1. `PiperMotorsBus.connect()` 使能 → `apply_calibration()` 对齐零位。
+  2. 启动 `scripts/run_vr_meshcat.py`，确认 Meshcat 中的末端姿态与实机一致。
+  3. 在 Teleop 循环中调用 `bus.write(target_joint=q.tolist())`；若遇异常立即调用 `safe_disconnect()` 并下电。
+  4. 收工前执行 `safe_disconnect()` 和 `connect(False)`，同时记录 `bus.read()` 的最终状态以便回放。

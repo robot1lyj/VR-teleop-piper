@@ -1,0 +1,7 @@
+{
+  "can_name": "can0",
+  "init_joint_position": [-5.0, 80.0, -161.0, 26.2, -8.3, -4.1, 0.0],
+  "safe_disable_position": [-5.0, 80.0, -161.0, 26.2, -8.3, -4.1, 0.0],
+  "pose_factor": 1000,
+  "joint_factor": 1000
+}
