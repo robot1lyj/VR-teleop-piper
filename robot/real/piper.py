@@ -147,6 +147,14 @@ class PiperMotorsBus:
 
         while True:
             if enable:
+                initial_flags = self._read_enable_flags()
+                if all(initial_flags):
+                    print("所有关节已上电，跳过重复使能")
+                    return True
+
+                if not self.piper.EnablePiper():
+                    time.sleep(0.01)
+                    continue
                 self.piper.EnableArm(7)
             else:
                 self.piper.DisableArm(7)

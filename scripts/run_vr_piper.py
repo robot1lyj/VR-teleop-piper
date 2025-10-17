@@ -12,8 +12,9 @@ import logging
 import math
 import pathlib
 import sys
+import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pinocchio as pin
@@ -64,16 +65,114 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._effort_samples = max(0, int(effort_samples))
         self._effort_interval = max(0.0, float(effort_interval))
         self._effort_mode = effort_mode.lower()
+        self._pending_command: Optional[Tuple[List[float], float]] = None
+        self._command_lock = threading.Lock()
+        self._command_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._worker: Optional[threading.Thread] = None
+        self._last_write_duration_ms: Optional[float] = None
+        self._last_queue_delay_ms: Optional[float] = None
+        self._last_gripper_effort: Optional[float] = None
+        self._metrics_lock = threading.Lock()
+
+        if self.bus is not None and not self.dry_run:
+            self._worker = threading.Thread(
+                target=self._command_worker,
+                name="piper-write-worker",
+                daemon=True,
+            )
+            self._worker.start()
 
     def _get_gripper_target(self, closed: bool) -> float:
         return self.gripper_closed if closed else self.gripper_open
 
     def _can_command(self) -> bool:
+        return self.bus is not None and not self.dry_run
+
+    def _queue_command(self, joints: List[float], gripper_value: float) -> bool:
         if self.bus is None or self.dry_run:
             return False
-        if self.command_interval <= 0.0:
-            return True
-        return (time.monotonic() - self._last_command_ts) >= self.command_interval
+        command = list(joints) + [gripper_value]
+        queued_ts = time.monotonic()
+        with self._command_lock:
+            self._pending_command = (command, queued_ts)
+            self._command_event.set()
+        return True
+
+    def _command_worker(self) -> None:
+        assert self.bus is not None
+        logger = logging.getLogger(__name__)
+        next_send = time.monotonic()
+
+        while not self._stop_event.is_set():
+            self._command_event.wait(0.1)
+            if self._stop_event.is_set():
+                break
+
+            with self._command_lock:
+                entry = self._pending_command
+                if entry is None:
+                    self._command_event.clear()
+                    continue
+                self._pending_command = None
+                self._command_event.clear()
+
+            command, queued_ts = entry
+
+            if self.command_interval > 0.0:
+                now = time.monotonic()
+                delay = next_send - now
+                if delay > 0.0:
+                    if self._stop_event.wait(delay):
+                        break
+
+            start = time.perf_counter()
+            queue_delay_ms = (time.monotonic() - queued_ts) * 1000.0
+            try:
+                self.bus.write(command)
+                duration_ms = (time.perf_counter() - start) * 1000.0
+                with self._metrics_lock:
+                    self._last_write_duration_ms = duration_ms
+                    self._last_queue_delay_ms = queue_delay_ms
+                logger.debug(
+                    "Piper 指令耗时 %.2f ms (排队 %.2f ms)",
+                    duration_ms,
+                    queue_delay_ms,
+                )
+
+                if self._effort_samples > 0:
+                    effort = self.bus.read_gripper_effort(
+                        samples=self._effort_samples,
+                        interval=self._effort_interval,
+                        mode=self._effort_mode,
+                    )
+                    with self._metrics_lock:
+                        self._last_gripper_effort = float(effort)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error("写入 Piper 指令失败: %s", exc)
+            finally:
+                now = time.monotonic()
+                self._last_command_ts = now
+                if self.command_interval > 0.0:
+                    next_send = now + self.command_interval
+
+        logger.debug("Piper 指令线程已停止")
+
+    def _clear_pending_command(self) -> None:
+        with self._command_lock:
+            self._pending_command = None
+            self._command_event.clear()
+
+    def shutdown(self) -> None:
+        self._stop_event.set()
+        self._command_event.set()
+        if self._worker is not None:
+            self._worker.join(timeout=1.0)
+            self._worker = None
+
+    def reset(self) -> None:  # type: ignore[override]
+        super().reset()
+        self._clear_pending_command()
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
         results = self.session.handle_vr_payload(payload)
@@ -98,25 +197,20 @@ class PiperTeleopPipeline(TeleopPipeline):
             summary["gripper_target"] = gripper_target
 
             if self._can_command():
-                try:
-                    command = list(joints) + [gripper_target]
-                    self.bus.write(command)  # type: ignore[union-attr]
-                    if self.command_interval > 0.0:
-                        self._last_command_ts = time.monotonic()
-                    summary["commanded"] = True
-                    if self._effort_samples > 0:
-                        effort = self.bus.read_gripper_effort(  # type: ignore[union-attr]
-                            samples=self._effort_samples,
-                            interval=self._effort_interval,
-                            mode=self._effort_mode,
-                        )
-                        summary["gripper_effort"] = effort
-                except Exception as exc:  # pylint: disable=broad-except
-                    logging.getLogger(__name__).error("写入 Piper 指令失败: %s", exc)
-                    summary["commanded"] = False
-                    summary["error"] = str(exc)
+                queued = self._queue_command(list(joints), gripper_target)
+                summary["commanded"] = queued
+                summary["queued"] = queued
             else:
                 summary["commanded"] = False
+                summary["queued"] = False
+
+            with self._metrics_lock:
+                if self._last_write_duration_ms is not None:
+                    summary["last_write_ms"] = self._last_write_duration_ms
+                if self._last_queue_delay_ms is not None:
+                    summary["last_queue_delay_ms"] = self._last_queue_delay_ms
+                if self._last_gripper_effort is not None:
+                    summary["gripper_effort"] = self._last_gripper_effort
 
             summaries.append(summary)
 
@@ -310,6 +404,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     try:
         asyncio.run(run_live(args, pipeline))
     finally:
+        try:
+            pipeline.shutdown()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("关闭指令线程失败: %s", exc)
+
         if bus is not None:
             try:
                 logger.info("退出遥操作：回到初始姿态待命")
