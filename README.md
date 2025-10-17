@@ -262,10 +262,12 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
 - `robot/real/piper.py` 提供 `PiperMotorsBus` 类，对 `C_PiperInterface_V2` 进行二次封装，核心方法如下：
   - `connect(enable: bool = True)`：上电或下电六轴与夹爪，内部自检 5 s 超时并记录返回状态。
   - `apply_calibration()`：将关节移动到 `init_joint_position` 设定的初始角。
-  - `write(target_joint: list)`：发送 6 轴 + 夹爪目标，单位按注释为弧度/米；内部会限制 4 号关节与夹爪的安全范围。
-  - `read()`：读取当前关节与夹爪状态，返回单位为 0.001°。
+  - `write(target_joint: list)`：发送 6 轴 + 夹爪目标（弧度 / 线性开度），内部自动转换成 0.001° 并限制 4 号关节与夹爪安全范围。
+  - `read()`：读取当前关节（弧度）与夹爪状态。
   - `safe_disconnect()`：在下电前回到 `safe_disable_position`。
-- 使用前请在 `configs/piper.json` 中将 `can_name`、`init_joint_position` 等参数改成现场的实际配置。建议在业务逻辑中包装 try/finally，确保异常时调用 `safe_disconnect()` 与 `connect(False)`。
+- 使用前请在 `configs/piper.json` 中将 `can_name`、`init_joint_position` 等参数改成现场的实际配置；配置文件中的 6 个关节角以角度（deg）填写，加载后会自动转换为弧度并在发送前转成 Piper 控制器要求的 0.001°。
+  `gripper_open` / `gripper_closed` 仍沿用 SDK 默认的线性位移单位（米），如需改用角度可在驱动层统一变换。
+  建议在业务逻辑中包装 try/finally，确保异常时调用 `safe_disconnect()` 与 `connect(False)`。
 
 ### 上位机自检脚本
 
@@ -276,8 +278,19 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
 
 ### 与 VR 管线集成
 
-- 真实硬件阶段依旧复用 `ArmTeleopSession` / `IncrementalPoseMapper` 生成的关节解；将 IK 输出的 `q` 直接传入 `PiperMotorsBus.write` 即可。
-- 推荐流程：
+- 新增脚本 `scripts/run_vr_piper.py` 已将 Meshcat 遥操作链路直接对接 Piper 实机：
+  ```bash
+  # 正装默认参数 + 实机（默认读取 configs/piper.json）
+  python scripts/run_vr_piper.py
+
+  # 仅观察指令，不下发硬件
+  python scripts/run_vr_piper.py --dry-run
+
+  # 若需自定义另一套配置，可共享同一个 JSON
+  python scripts/run_vr_piper.py --config configs/run_vr_meshcat_side30.json
+  ```
+  该脚本会复用 `run_vr_meshcat.py` 的 IK/映射设置，按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，并在 DataChannel 回调里将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open/--effort-samples` 等参数即可调整指令频率、手爪目标和扭矩采样策略；未显式指定 `--piper-config` 时会默认复用 `--config` 所指向的同一份 JSON。
+- 若需要手动对接或进一步定制，可继续参考 `ArmTeleopSession` / `IncrementalPoseMapper` 的组合：
   1. `PiperMotorsBus.connect()` 使能 → `apply_calibration()` 对齐零位。
   2. 启动 `scripts/run_vr_meshcat.py`，确认 Meshcat 中的末端姿态与实机一致。
   3. 在 Teleop 循环中调用 `bus.write(target_joint=q.tolist())`；若遇异常立即调用 `safe_disconnect()` 并下电。

@@ -1,6 +1,6 @@
 # 真实机器人适配教程
 
-本指南基于仓库默认的 VR 手柄 → IK 遥操作“基线”实现，逐步说明如何将管线对接到真实机械臂。本教程假定你已经能在本地成功运行 `scripts/run_vr_meshcat.py` 并确认 Meshcat 中的模型能随手柄运动；接下来我们将把同样的轨迹送到实体机器人。
+本指南基于仓库默认的 VR 手柄 → IK 遥操作“基线”实现，逐步说明如何将管线对接到真实机械臂。本教程假定你已经能在本地成功运行 `scripts/run_vr_meshcat.py` 并确认 Meshcat 中的模型能随手柄运动；接下来我们将把同样的轨迹送到实体机器人。快速接入可直接使用 `scripts/run_vr_piper.py`（默认读取 `configs/piper.json`，内含 VR + Piper 硬件的统一参数），该脚本已将 VR 管线与 Piper SDK 串联，可按需参考下文细节继续自定义。
 
 ## 1. 整体数据链路回顾
 
@@ -121,6 +121,7 @@ def handle_results(results):
 关键要点：
 
 - **初始参考位姿**：将真实机器人当前末端姿态写入 `session.set_reference_pose`，使增量映射以实体的“零点”作为基准。可以在上电后先读取一次关节角，利用 Pinocchio 计算末端位姿。
+- **单位统一**：`scripts/run_vr_piper.py` 与 `PiperMotorsBus` 以弧度（rad）接收关节目标，在写入前自动转换成控制器要求的 0.001°。配置文件 `configs/piper.json` 中的 6 个关节角建议用角度（deg）填写，驱动加载时会统一转成弧度；`gripper_open` / `gripper_closed` 仍按 SDK 约定维持线性位移（米）。
 - **平滑/信赖域**：真实机械臂对突变指令更敏感，建议在 `configs/run_vr_meshcat.json` 或脚本中开启：
   - `smooth_weight`（默认 0.05）+ `joint_smooth_weights`，抑制帧间大幅摆动。
   - `trust_region`，限制每帧关节步长，例如 `0.1`（弧度）或 `[0.1, 0.1, ...]` 列表。

@@ -1,7 +1,9 @@
 import json
+import math
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Deque, Dict, List, Sequence, Tuple
 
 
 from piper_sdk import *
@@ -42,15 +44,23 @@ def _ensure_float_list(values: Any, key: str) -> List[float]:
         raise ValueError(f"配置项 '{key}' 中存在无法转换的数值") from exc
 
 
+def _degrees_to_internal(values: List[float]) -> List[float]:
+    """将配置中的关节角（度）转换为内部使用的弧度，夹爪值保持原样。"""
+
+    converted = [math.radians(val) for val in values[:6]]
+    if len(values) >= 7:
+        converted.append(values[6])
+    return converted
+
+
 def _load_piper_config(config_path: str | Path | None) -> Dict[str, Any]:
     """读取 Piper 配置文件，补全缺省值并校验关键字段。"""
 
     defaults: Dict[str, Any] = {
         "can_name": "can0",
-        "init_joint_position": [-5, 80, -161, 26.2, -8.3, -4.1, 0.0],
+        "init_joint_position": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "safe_disable_position": None,
-        "pose_factor": 1000,
-        "joint_factor": 1000,
+        "joint_factor": 57296.0,
     }
 
     path = _resolve_config_path(config_path)
@@ -73,19 +83,15 @@ def _load_piper_config(config_path: str | Path | None) -> Dict[str, Any]:
         raise ValueError("配置项 'can_name' 必须为非空字符串")
     config["can_name"] = can_name.strip()
 
-    config["init_joint_position"] = _ensure_float_list(config["init_joint_position"], "init_joint_position")
+    init_joint_deg = _ensure_float_list(config["init_joint_position"], "init_joint_position")
+    config["init_joint_position"] = _degrees_to_internal(init_joint_deg)
 
     safe_disable = config.get("safe_disable_position")
     if safe_disable is None:
-        safe_disable = list(config["init_joint_position"])
+        safe_disable_deg = list(init_joint_deg)
     else:
-        safe_disable = _ensure_float_list(safe_disable, "safe_disable_position")
-    config["safe_disable_position"] = safe_disable
-
-    try:
-        config["pose_factor"] = float(config["pose_factor"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError("配置项 'pose_factor' 无法转换为浮点数") from exc
+        safe_disable_deg = _ensure_float_list(safe_disable, "safe_disable_position")
+    config["safe_disable_position"] = _degrees_to_internal(safe_disable_deg)
 
     try:
         config["joint_factor"] = float(config["joint_factor"])
@@ -107,63 +113,65 @@ class PiperMotorsBus:
         self.can_name = config["can_name"]
         self.init_joint_position = config["init_joint_position"]
         self.safe_disable_position = config["safe_disable_position"]
-        self.pose_factor = config["pose_factor"]  # 单位 0.001 mm
-        self.joint_factor = config["joint_factor"]  # 1000*180/pi， rad -> 度（单位 0.001 deg）
+        self.joint_factor = config["joint_factor"]  # 用于兼容旧配置的缩放因子（默认 rad -> mdeg）
+        self.rad_to_mdeg = float(config.get("joint_factor", 180.0 / math.pi * 1000.0))
+        self.mdeg_to_rad = math.pi / 180.0 / 1000.0
 
         self.piper = C_PiperInterface_V2(self.can_name)
         self.piper.ConnectPort()
 
+        self._effort_history: Deque[float] = deque(maxlen=50)
+        self._joint_mode_configured = False
 
 
+
+
+    def _read_enable_flags(self) -> List[bool]:
+        info = self.piper.GetArmLowSpdInfoMsgs()
+        return [
+            bool(info.motor_1.foc_status.driver_enable_status),
+            bool(info.motor_2.foc_status.driver_enable_status),
+            bool(info.motor_3.foc_status.driver_enable_status),
+            bool(info.motor_4.foc_status.driver_enable_status),
+            bool(info.motor_5.foc_status.driver_enable_status),
+            bool(info.motor_6.foc_status.driver_enable_status),
+        ]
 
     def connect(self, enable:bool=True) -> bool:
         '''
             使能机械臂并检测使能状态,尝试5s,如果使能超时则退出程序
         '''
-        enable_flag = False
-        loop_flag = False
-        # 设置超时时间（秒）
-        timeout = 5
-        # 记录进入循环前的时间
-        start_time = time.time()
-        while not (loop_flag):
-            elapsed_time = time.time() - start_time
-            print("--------------------")
-            enable_list = []
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_1.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_2.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_3.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_4.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_5.foc_status.driver_enable_status)
-            enable_list.append(self.piper.GetArmLowSpdInfoMsgs().motor_6.foc_status.driver_enable_status)
-            if(enable):
-                enable_flag = all(enable_list)
+        timeout = 5.0
+        interval = 0.2
+        deadline = time.time() + timeout
+
+        while True:
+            if enable:
                 self.piper.EnableArm(7)
-                self.piper.GripperCtrl(0,1000,0x01, 0)
             else:
-                # move to safe disconnect position
-                enable_flag = any(enable_list)
                 self.piper.DisableArm(7)
-                self.piper.GripperCtrl(0,1000,0x02, 0)
-            print(f"使能状态: {enable_flag}")
+
+            flags = self._read_enable_flags()
+            enabled_count = sum(flags)
             print("--------------------")
-            if(enable_flag == enable):
-                loop_flag = True
-                enable_flag = True
-            else: 
-                loop_flag = False
-                enable_flag = False
-            # 检查是否超过超时时间
-            if elapsed_time > timeout:
-                print("超时....")
-                enable_flag = False
-                loop_flag = True
-                break
-            time.sleep(0.5)
-        resp = enable_flag
-        print(f"Returning response: {resp}")
-        return resp
-    
+            print(f"当前上电关节数量: {enabled_count}/6")
+            print("--------------------")
+
+            if enable and all(flags):
+                self.piper.GripperCtrl(0, 1000, 0x01, 0)
+                self._joint_mode_configured = False
+                return True
+            if not enable and not any(flags):
+                self.piper.GripperCtrl(0, 1000, 0x02, 0)
+                self._joint_mode_configured = False
+                return True
+
+            if time.time() >= deadline:
+                print("使能超时，停止尝试")
+                return False
+
+            time.sleep(interval)
+
 
 
     def set_calibration(self):
@@ -178,43 +186,34 @@ class PiperMotorsBus:
         """
         self.write(target_joint=self.init_joint_position)
 
-    def write(self, target_joint:list):
-        """
-            Joint control
-            - target joint: in radians
-                joint_1 (float): 关节1角度 (-92000~92000) / 57324.840764
-                joint_2 (float): 关节2角度 -1300 ~ 90000 / 57324.840764
-                joint_3 (float): 关节3角度 2400 ~ -80000 / 57324.840764
-                joint_4 (float): 关节4角度 -90000~90000 / 57324.840764
-                joint_5 (float): 关节5角度 19000~-77000 / 57324.840764
-                joint_6 (float): 关节6角度 -90000~90000 / 57324.840764
-                gripper_range: 夹爪角度 0~0.08
-        """
-        joint_0 = round(target_joint[0]*self.joint_factor)
-        joint_1 = round(target_joint[1]*self.joint_factor)
-        joint_2 = round(target_joint[2]*self.joint_factor)
-        joint_3 = round(target_joint[3]*self.joint_factor)
-        joint_4 = round(target_joint[4]*self.joint_factor)
-        joint_5 = round(target_joint[5]*self.joint_factor)
-        gripper_range = round(target_joint[6]*1000*100)
+    def write(self, target_joint: List[float]) -> None:
+        """Joint control（输入单位为弧度，内部自动转换成 0.001°）。"""
 
-        if joint_4 < -70000:
-            joint_4 = -70000
-        if joint_3 <-178:
-            joint_3 = -173
-        if gripper_range < 1000000:
+        if len(target_joint) != 7:
+            raise ValueError("target_joint 长度必须为 7 (6 轴 + 夹爪)")
+
+        joint_cmds = [round(val * self.rad_to_mdeg) for val in target_joint[:6]]
+        gripper_range = round(target_joint[6] * 1000.0 * 100.0)
+
+        if joint_cmds[4] < -70000:
+            joint_cmds[4] = -70000
+
+        if joint_cmds[3] < -178000:
+            joint_cmds[3] = -173000
+
+        if gripper_range < 0:
             gripper_range = 0
 
-        self.piper.MotionCtrl_2(0x01, 0x01, 80, 0xAD) # joint control
-        self.piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
-        self.piper.GripperCtrl(abs(gripper_range), 1000, 0x01, 0) # 单位 0.001°
+        if not self._joint_mode_configured:
+            self.piper.MotionCtrl_2(0x01, 0x01, 80, 0x00)  # joint control
+            self._joint_mode_configured = True
+
+        self.piper.JointCtrl(*joint_cmds)
+        self.piper.GripperCtrl(abs(gripper_range), 1000, 0x01, 0)  # 单位 0.001°
     
 
     def read(self) -> Dict:
-        """
-            - 机械臂关节消息,单位0.001度
-            - 机械臂夹爪消息
-        """
+        """读取当前关节状态（弧度）和夹爪开度。"""
         joint_msg = self.piper.GetArmJointMsgs()
         joint_state = joint_msg.joint_state
 
@@ -222,14 +221,74 @@ class PiperMotorsBus:
         gripper_state = gripper_msg.gripper_state
         
         return {
-            "joint_1": joint_state.joint_1 / 1000,
-            "joint_2": joint_state.joint_2 / 1000,
-            "joint_3": joint_state.joint_3 / 1000,
-            "joint_4": joint_state.joint_4 / 1000,
-            "joint_5": joint_state.joint_5 / 1000,
-            "joint_6": joint_state.joint_6 / 1000,
+            "joint_1": joint_state.joint_1 * self.mdeg_to_rad,
+            "joint_2": joint_state.joint_2 * self.mdeg_to_rad,
+            "joint_3": joint_state.joint_3 * self.mdeg_to_rad,
+            "joint_4": joint_state.joint_4 * self.mdeg_to_rad,
+            "joint_5": joint_state.joint_5 * self.mdeg_to_rad,
+            "joint_6": joint_state.joint_6 * self.mdeg_to_rad,
             "gripper": gripper_state.grippers_angle / 1000
         }
+    
+    def read_gripper_effort(
+        self,
+        samples: int = 3,
+        interval: float = 0.02,
+        mode: str = "mean",
+        return_samples: bool = False,
+    ) -> float | Tuple[float, List[float]]:
+        """采样夹爪扭矩，支持多次采样与简单滤波。
+
+        Args:
+            samples: 采样次数，大于等于 1。
+            interval: 连续采样之间的等待时间（秒）。
+            mode: 对采样值进行聚合的方式，可选 ``mean``、``median``、``max``、``min``、``last``。
+            return_samples: 若为 True，则同时返回原始采样列表。
+
+        Returns:
+            聚合后的扭矩数值；当 ``return_samples`` 为 True 时返回 ``(数值, 原始列表)``。
+        """
+
+        if samples <= 0:
+            raise ValueError("参数 'samples' 需大于 0")
+
+        efforts: List[float] = []
+        for idx in range(samples):
+            msg = self.piper.GetArmGripperMsgs()
+            effort = float(msg.gripper_state.grippers_effort)
+            efforts.append(effort)
+            if idx < samples - 1 and interval > 0:
+                time.sleep(interval)
+
+        match mode.lower():
+            case "mean":
+                aggregated = sum(efforts) / len(efforts)
+            case "median":
+                sorted_efforts = sorted(efforts)
+                mid = len(sorted_efforts) // 2
+                if len(sorted_efforts) % 2 == 1:
+                    aggregated = sorted_efforts[mid]
+                else:
+                    aggregated = (sorted_efforts[mid - 1] + sorted_efforts[mid]) / 2
+            case "max":
+                aggregated = max(efforts)
+            case "min":
+                aggregated = min(efforts)
+            case "last":
+                aggregated = efforts[-1]
+            case _:
+                raise ValueError("参数 'mode' 仅支持 mean/median/max/min/last")
+
+        self._effort_history.append(aggregated)
+
+        if return_samples:
+            return aggregated, efforts
+        return aggregated
+
+    def get_gripper_effort_history(self) -> List[float]:
+        """返回近期夹爪扭矩的缓存列表（旧值在前）。"""
+
+        return list(self._effort_history)
     
     def safe_disconnect(self):
         """ 

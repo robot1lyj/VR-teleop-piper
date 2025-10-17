@@ -7,13 +7,13 @@ from piper_sdk import *
 
 if __name__ == "__main__":
 
-    piper1 = C_PiperInterface_V2("can_right")
+    piper1 = C_PiperInterface_V2("can0")
     piper1.ConnectPort()
     while( not piper1.EnablePiper()):
         time.sleep(0.01)
     factor = 1000 #1000*180/3.1415926
-    #position = [ 0 , 0, 0,   0 ,0, 0,60]
-    position = [ -92 , 164, -151,  -90,0, -180,58]
+    position = [ 0 , 0, 0,   0 ,0, 0,60]
+    # position = [ -92 , 164, -151,  -90,0, -180,58]
     
     joint_0 = round(position[0]*factor)
     joint_1 = round(position[1]*factor)
