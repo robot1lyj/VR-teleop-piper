@@ -213,7 +213,7 @@ class PiperMotorsBus:
             gripper_range = 0
 
         if not self._joint_mode_configured:
-            self.piper.MotionCtrl_2(0x01, 0x01, 80, 0x00)  # joint control
+            self.piper.MotionCtrl_2(0x01, 0x01, 60, 0x01)  # joint control
             self._joint_mode_configured = True
 
         self.piper.JointCtrl(*joint_cmds)

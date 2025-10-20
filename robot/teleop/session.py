@@ -56,7 +56,10 @@ class ArmTeleopSession:
     def set_scale(self, scale: float) -> None:
         """调整位置增量缩放比例。"""
 
-        self.mapper.scale = float(scale)
+        if hasattr(self.mapper, "set_scale") and callable(getattr(self.mapper, "set_scale")):
+            self.mapper.set_scale(float(scale))
+        else:
+            self.mapper.scale = float(scale)
 
     def set_check_collision(self, enabled: bool) -> None:
         """切换是否在 IK 结束后进行自碰撞检测。"""

@@ -421,24 +421,29 @@
       return { gripActive: false, trigger: 0, menuPressed: false };
     }
 
-    const triggerButton = gamepad.buttons?.[0];
-    const gripButton = gamepad.buttons?.[1];
-    const extraButtons = Array.isArray(gamepad.buttons) ? gamepad.buttons.slice(3) : [];
+    const buttons = Array.isArray(gamepad.buttons) ? gamepad.buttons : [];
+    const triggerButton = buttons[0];
+    const gripButton = buttons[1];
+    const buttonB = buttons[4] ?? buttons[3] ?? null;
 
-    const triggerValue = triggerButton ? triggerButton.value || (triggerButton.pressed ? 1 : 0) : 0;
-    const gripValue = gripButton ? gripButton.value || (gripButton.pressed ? 1 : 0) : 0;
-    const menuPressed = extraButtons.some((button) => {
-      if (!button) return false;
-      if (typeof button.pressed === 'boolean' && button.pressed) {
-        return true;
+    const readValue = (button) => {
+      if (!button) return 0;
+      if (typeof button.value === 'number') {
+        return button.value;
       }
-      return typeof button.value === 'number' && button.value > 0.5;
-    });
+      return button.pressed ? 1 : 0;
+    };
+
+    const triggerValue = readValue(triggerButton);
+    const gripValue = readValue(gripButton);
+    const menuPressed = false;
+    const fineButtonPressed = buttonB ? readValue(buttonB) > 0.5 : false;
 
     return {
       gripActive: gripValue > 0.5,
       trigger: triggerValue,
       menuPressed,
+      fineButtonPressed,
     };
   }
 
@@ -454,8 +459,8 @@
       this.right = document.getElementById('rightController');
       this.lastSent = 0;
       this.scene = this.el.sceneEl || this.el;
-      this.menuHoldMs = 0;
-      this.menuTriggered = false;
+      this.fineToggleState = { left: false, right: false };
+      this.fineButtonPrev = { left: false, right: false };
     },
 
     tick(time, delta) {
@@ -479,7 +484,6 @@
 
       const payload = { timestamp: Date.now() };
       let hasData = false;
-      let exitIntent = false;
 
       const rawMode = this.data.hands;
       const mode = rawMode === 'left' || rawMode === 'right' ? rawMode : 'both';
@@ -492,6 +496,7 @@
 
       const processController = (controllerEl, handKey) => {
         if (!controllerEl || !controllerEl.object3D.visible) {
+          this.fineButtonPrev[handKey] = false;
           return null;
         }
 
@@ -499,9 +504,11 @@
         const quat = controllerEl.object3D.quaternion;
         const buttons = captureGamepadState(controllerEl);
 
-        if (buttons.menuPressed) {
-          exitIntent = true;
+        const finePressed = Boolean(buttons.fineButtonPressed);
+        if (finePressed && !this.fineButtonPrev[handKey]) {
+          this.fineToggleState[handKey] = !this.fineToggleState[handKey];
         }
+        this.fineButtonPrev[handKey] = finePressed;
 
         return {
           hand: handKey,
@@ -510,6 +517,7 @@
           gripActive: buttons.gripActive,
           trigger: buttons.trigger,
           menuPressed: buttons.menuPressed,
+          fineTuneActive: this.fineToggleState[handKey],
         };
       };
 
@@ -529,25 +537,6 @@
         window.VRBridge.send(payload);
       }
 
-      if (exitIntent) {
-        this.menuHoldMs += delta;
-        if (this.menuHoldMs >= 800 && !this.menuTriggered) {
-          this.menuTriggered = true;
-          document.dispatchEvent(
-            new CustomEvent(EVENT_LOG, {
-              detail: { message: '🛑 手柄请求停止手柄追踪（长按侧键）' },
-            })
-          );
-          document.dispatchEvent(
-            new CustomEvent('vrbridge-stop-request', {
-              detail: { source: 'controller' },
-            })
-          );
-        }
-      } else {
-        this.menuHoldMs = 0;
-        this.menuTriggered = false;
-      }
     },
   });
 })();

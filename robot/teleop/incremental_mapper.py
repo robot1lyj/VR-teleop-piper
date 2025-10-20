@@ -105,6 +105,10 @@ class IncrementalPoseMapper:
         scale: float = 1.0,
         allowed_hands: Optional[Iterable[str]] = None,
         rotation_vr_to_base: np.ndarray = R_BV_DEFAULT,
+        *,
+        fine_scale: float | None = None,
+        fine_filter_alpha: float = 0.3,
+        fine_deadband: float = 0.002,
     ) -> None:
         allowed_set = set(allowed_hands or {"left", "right"})
         invalid = allowed_set - {"left", "right"}
@@ -116,6 +120,12 @@ class IncrementalPoseMapper:
         self.rotation_vr_to_base = np.asarray(rotation_vr_to_base, dtype=float).reshape(3, 3)
         self.rotation_base_to_vr = self.rotation_vr_to_base.T
 
+        self._fine_scale_custom = fine_scale is not None
+        base_fine_scale = float(fine_scale) if fine_scale is not None else float(min(self.scale, 1.0))
+        self.fine_scale = base_fine_scale if base_fine_scale > 0 else 0.5
+        self.fine_filter_alpha = float(np.clip(fine_filter_alpha, 0.0, 1.0))
+        self.fine_deadband = float(max(fine_deadband, 0.0))
+
         self.controllers: Dict[str, ControllerState] = {
             "left": ControllerState("left"),
             "right": ControllerState("right"),
@@ -123,6 +133,10 @@ class IncrementalPoseMapper:
         self.reference_poses: Dict[str, Dict[str, np.ndarray]] = {}
         # 每只手柄握持时缓存一次局部坐标映射，避免重复计算。
         self.controller_frames: Dict[str, Dict[str, np.ndarray]] = {}
+        self._filtered_deltas: Dict[str, np.ndarray] = {
+            "left": np.zeros(3, dtype=float),
+            "right": np.zeros(3, dtype=float),
+        }
 
     def set_reference_pose(self, hand: str, position: np.ndarray, rotation: np.ndarray) -> None:
         """记录机械臂当前末端位姿，作为增量累加的基准。"""
@@ -136,6 +150,12 @@ class IncrementalPoseMapper:
         rot = np.asarray(rotation, dtype=float).reshape(3, 3)
         self.reference_poses[hand] = {"position": pos, "rotation": rot}
         self.controller_frames.pop(hand, None)
+        self._filtered_deltas[hand] = np.zeros(3, dtype=float)
+
+    def set_scale(self, scale: float) -> None:
+        self.scale = float(scale)
+        if not self._fine_scale_custom:
+            self.fine_scale = float(min(self.scale, 1.0))
 
     def clear_reference_pose(self, hand: str) -> None:
         """当控制权移交或重置时移除参考位姿。"""
@@ -207,6 +227,9 @@ class IncrementalPoseMapper:
         trigger_value = float(payload.get("trigger", 0.0))
         trigger_active = trigger_value > 0.5
         controller.trigger_active = trigger_active
+        fine_active = bool(payload.get("fineTuneActive", False))
+        was_fine_active = controller.fine_tune_active
+        controller.fine_tune_active = fine_active
 
         if position is None:
             return None
@@ -215,6 +238,7 @@ class IncrementalPoseMapper:
             if controller.grip_active:
                 controller.reset_grip()
                 self.controller_frames.pop(hand, None)
+                self._filtered_deltas[hand] = np.zeros(3, dtype=float)
             return None
 
         position_vec = np.array(
@@ -236,7 +260,23 @@ class IncrementalPoseMapper:
                 controller.origin_quaternion = None
                 controller.accumulated_quaternion = None
             self._cache_controller_frame(hand, reference, controller.origin_quaternion)
+            self._filtered_deltas[hand] = np.zeros(3, dtype=float)
             return None
+
+        if fine_active and not was_fine_active:
+            controller.origin_position = position_vec
+            if quaternion_payload:
+                controller.origin_quaternion = _quaternion_from_payload(quaternion_payload)
+                controller.accumulated_quaternion = controller.origin_quaternion
+            else:
+                controller.origin_quaternion = None
+                controller.accumulated_quaternion = None
+            self._cache_controller_frame(hand, reference, controller.origin_quaternion)
+            self._filtered_deltas[hand] = np.zeros(3, dtype=float)
+            return None
+
+        if was_fine_active and not fine_active:
+            self._filtered_deltas[hand] = np.zeros(3, dtype=float)
 
         if quaternion_payload:
             quaternion_now = _quaternion_from_payload(quaternion_payload)
@@ -252,7 +292,11 @@ class IncrementalPoseMapper:
             origin_position = np.zeros(3)
         delta_vr = position_vec - origin_position
         delta_base = self.rotation_vr_to_base @ delta_vr
-        goal_position = reference["position"] + self.scale * delta_base
+        if fine_active:
+            goal_position = reference["position"] + self._apply_fine_translation(hand, delta_base)
+        else:
+            goal_position = reference["position"] + self.scale * delta_base
+            self._filtered_deltas[hand] = np.zeros(3, dtype=float)
 
         goal_rotation = reference["rotation"]
         frame_cache = self.controller_frames.get(hand)
@@ -284,3 +328,30 @@ class IncrementalPoseMapper:
             rotation=goal_rotation,
             gripper_closed=not controller.trigger_active,
         )
+
+    def _apply_fine_translation(self, hand: str, delta_base: np.ndarray) -> np.ndarray:
+        raw_delta = delta_base.astype(float)
+        deadband = self.fine_deadband
+        if deadband > 0.0:
+            norm = float(np.linalg.norm(raw_delta))
+            if norm <= deadband:
+                raw_delta = np.zeros(3, dtype=float)
+            else:
+                raw_delta *= (norm - deadband) / norm
+
+        raw_delta *= self.fine_scale
+
+        alpha = self.fine_filter_alpha
+        prev_filtered = self._filtered_deltas.get(hand)
+        if prev_filtered is None:
+            prev_filtered = np.zeros(3, dtype=float)
+
+        if not np.any(raw_delta):
+            filtered = np.zeros(3, dtype=float)
+        elif alpha <= 0.0:
+            filtered = raw_delta
+        else:
+            filtered = alpha * raw_delta + (1.0 - alpha) * prev_filtered
+
+        self._filtered_deltas[hand] = filtered
+        return filtered

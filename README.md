@@ -137,7 +137,6 @@ pip install aiortc websockets numpy pin python-casadi meshcat
      --auto-stop
    ```
    - 自动开始：任意参与录制的手柄握持键持续按下 ≈3 帧（可用 `--start-grip-threshold` 调整）后写入。
-   - 自动停止：手柄长按 A/B（或 X/Y）约 0.8 秒触发 `menuPressed`，脚本自动收尾并退出。
 2. 按照实时遥操作同样的方式连接手柄，若未开启自动停止，可按 `Ctrl+C` 手动结束，JSONL 文件会保存每帧的原始报文和归一化结果。
 3. 可为不同测试场景建立多个轨迹文件，以便复用。
 

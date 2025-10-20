@@ -33,6 +33,7 @@ class ControllerState:
     hand: str
     grip_active: bool = False
     trigger_active: bool = False
+    fine_tune_active: bool = False
 
     origin_position: Optional[np.ndarray] = None
     origin_quaternion: Optional[np.ndarray] = None
@@ -50,6 +51,7 @@ class ControllerState:
         self.accumulated_quaternion = None
         self.z_axis_rotation = 0.0
         self.x_axis_rotation = 0.0
+        self.fine_tune_active = False
 
 
 # 两个全局实例分别跟踪左右手柄的状态，供服务器循环复用。
