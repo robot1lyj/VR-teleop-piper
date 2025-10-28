@@ -14,7 +14,8 @@ import pathlib
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pinocchio as pin
@@ -36,6 +37,82 @@ from scripts.run_vr_meshcat import (  # type: ignore[import]
 from vr_runtime.webrtc_endpoint import VRWebRTCServer
 
 
+class JointCommandFilter:
+    """二阶临界阻尼滤波 + 速度/加速度限幅。"""
+
+    def __init__(
+        self,
+        dof: int,
+        max_speed_deg: Sequence[float],
+        max_acc_deg: Sequence[float],
+        kp: float = 9.0,
+        kd: float = 3.50,
+        error_deadband_deg: float = 0.12,
+    ) -> None:
+        self.dof = dof
+        self._kp = float(kp)
+        self._kd = float(kd)
+        self._max_speed = np.deg2rad(np.asarray(max_speed_deg, dtype=float).reshape(dof))
+        self._max_acc = np.deg2rad(np.asarray(max_acc_deg, dtype=float).reshape(dof))
+        self._error_deadband = math.radians(abs(error_deadband_deg)) if error_deadband_deg > 0 else 0.0
+        self._pos = np.zeros(dof, dtype=float)
+        self._vel = np.zeros(dof, dtype=float)
+        self._initialized = False
+        self._last_ts: Optional[float] = None
+
+    def reset(self) -> None:
+        self._pos[:] = 0.0
+        self._vel[:] = 0.0
+        self._initialized = False
+        self._last_ts = None
+
+    def prime(self, joints: Sequence[float]) -> None:
+        self._pos = np.asarray(joints, dtype=float).reshape(self.dof).copy()
+        self._vel[:] = 0.0
+        self._initialized = True
+        self._last_ts = time.monotonic()
+
+    def step(self, joints: Sequence[float]) -> np.ndarray:
+        target = np.asarray(joints, dtype=float).reshape(self.dof)
+        now = time.monotonic()
+        if not self._initialized:
+            self.prime(target)
+            return target.copy()
+
+        dt = now - self._last_ts if self._last_ts is not None else 0.0
+        dt = max(dt, 1e-3)
+
+        error = target - self._pos
+        if self._error_deadband > 0.0:
+            mask = np.abs(error) <= self._error_deadband
+            if np.any(mask):
+                error = error.copy()
+                error[mask] = 0.0
+
+        acc_cmd = self._kp * error - self._kd * self._vel
+        acc_clamped = np.clip(acc_cmd, -self._max_acc, self._max_acc)
+
+        vel = self._vel + acc_clamped * dt
+        vel = np.clip(vel, -self._max_speed, self._max_speed)
+
+        pos = self._pos + vel * dt
+
+        self._pos = pos
+        self._vel = vel
+        self._last_ts = now
+        return pos.copy()
+
+
+def _coerce_limits(values: Sequence[float], dof: int, name: str) -> List[float]:
+    try:
+        result = [float(v) for v in values]
+    except TypeError as exc:  # values 不是可迭代
+        raise ValueError(f"{name} 需提供 {dof} 个浮点数") from exc
+    if len(result) != dof:
+        raise ValueError(f"{name} 需要提供 {dof} 个数值，实际 {len(result)}")
+    return result
+
+
 class PiperTeleopPipeline(TeleopPipeline):
     """在 Meshcat 版基础上加入 Piper 机械臂命令下发。"""
 
@@ -54,6 +131,9 @@ class PiperTeleopPipeline(TeleopPipeline):
         effort_samples: int,
         effort_interval: float,
         effort_mode: str,
+        joint_speed_limits_deg: Sequence[float],
+        joint_acc_limits_deg: Sequence[float],
+        joint_error_deadband_deg: float,
         fine_scale: Optional[float] = None,
         fine_filter_alpha: float = 0.3,
         fine_deadband: float = 0.002,
@@ -80,6 +160,26 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._last_queue_delay_ms: Optional[float] = None
         self._last_gripper_effort: Optional[float] = None
         self._metrics_lock = threading.Lock()
+        self._last_filtered_joints: Optional[np.ndarray] = None
+
+        dof = getattr(getattr(session.ik_solver, "reduced_robot", None), "model", None)
+        if dof is not None:
+            dof_value = getattr(dof, "nq", None)
+        else:
+            dof_value = None
+        if not isinstance(dof_value, int) or dof_value <= 0:
+            dof_value = len(getattr(session.ik_solver, "q_seed", []))
+        if dof_value <= 0:
+            dof_value = 6
+
+        speed_limits = _coerce_limits(joint_speed_limits_deg, dof_value, "joint_speed_limits_deg")
+        accel_limits = _coerce_limits(joint_acc_limits_deg, dof_value, "joint_acc_limits_deg")
+        self._joint_filter = JointCommandFilter(
+            dof=dof_value,
+            max_speed_deg=speed_limits,
+            max_acc_deg=accel_limits,
+            error_deadband_deg=joint_error_deadband_deg,
+        )
 
         if self.bus is not None and not self.dry_run:
             self._worker = threading.Thread(
@@ -109,7 +209,7 @@ class PiperTeleopPipeline(TeleopPipeline):
     def _can_command(self) -> bool:
         return self.bus is not None and not self.dry_run
 
-    def _queue_command(self, joints: List[float], gripper_value: float) -> bool:
+    def _queue_command(self, joints: Sequence[float], gripper_value: float) -> bool:
         if self.bus is None or self.dry_run:
             return False
         command = list(joints) + [gripper_value]
@@ -117,6 +217,7 @@ class PiperTeleopPipeline(TeleopPipeline):
         with self._command_lock:
             self._pending_command = (command, queued_ts)
             self._command_event.set()
+        self._last_filtered_joints = np.asarray(joints, dtype=float).copy()
         return True
 
     def _command_worker(self) -> None:
@@ -183,16 +284,27 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._pending_command = None
             self._command_event.clear()
 
+    def prime_joint_filter(self, joints: Sequence[float]) -> None:
+        try:
+            self._joint_filter.prime(joints)
+            self._last_filtered_joints = np.asarray(joints, dtype=float).reshape(self._joint_filter.dof)
+        except Exception:
+            self._joint_filter.reset()
+
     def shutdown(self) -> None:
         self._stop_event.set()
         self._command_event.set()
         if self._worker is not None:
             self._worker.join(timeout=1.0)
             self._worker = None
+        self._joint_filter.reset()
+        self._last_filtered_joints = None
 
     def reset(self) -> None:  # type: ignore[override]
         super().reset()
         self._clear_pending_command()
+        self._joint_filter.reset()
+        self._last_filtered_joints = None
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
         results = self.session.handle_vr_payload(payload)
@@ -211,13 +323,20 @@ class PiperTeleopPipeline(TeleopPipeline):
                 continue
 
             joints = np.asarray(item.joints, dtype=float).reshape(-1)
-            summary["target_joints_rad"] = joints.tolist()
-            summary["target_joints_deg"] = [math.degrees(val) for val in joints]
+            summary["ik_joints_rad"] = joints.tolist()
+            summary["ik_joints_deg"] = [math.degrees(val) for val in joints]
+            summary["target_joints_rad"] = summary["ik_joints_rad"]
+            summary["target_joints_deg"] = summary["ik_joints_deg"]
             gripper_target = self._get_gripper_target(item.gripper_closed)
             summary["gripper_target"] = gripper_target
 
+            filtered = self._joint_filter.step(joints)
+            summary["command_joints_rad"] = filtered.tolist()
+            summary["command_joints_deg"] = [math.degrees(val) for val in filtered]
+            self._last_filtered_joints = filtered.copy()
+
             if self._can_command():
-                queued = self._queue_command(list(joints), gripper_target)
+                queued = self._queue_command(filtered, gripper_target)
                 summary["commanded"] = queued
                 summary["queued"] = queued
             else:
@@ -265,6 +384,7 @@ def _sync_reference_with_robot(
     pipeline.reference_translation = ee_pose.translation
     pipeline.reference_rotation = ee_pose.rotation
     pipeline._apply_reference()
+    pipeline.prime_joint_filter(joints_rad)
 
 
 def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
@@ -320,6 +440,26 @@ def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.A
         choices=["mean", "median", "max", "min", "last"],
         default="mean",
         help="夹爪扭矩采样聚合方式",
+    )
+    parser.add_argument(
+        "--joint-speed-limits-deg",
+        type=float,
+        nargs="+",
+        default=[180.0, 195.0, 180.0, 225.0, 225.0, 225.0],
+        help="关节最大速度限制(度/秒)，按 joint1..joint6 顺序提供",
+    )
+    parser.add_argument(
+        "--joint-acc-limits-deg",
+        type=float,
+        nargs="+",
+        default=[400.0, 400.0, 400.0, 450.0, 450.0, 450.0],
+        help="关节最大加速度限制(度/秒^2)，按 joint1..joint6 顺序提供",
+    )
+    parser.add_argument(
+        "--joint-error-deadband-deg",
+        type=float,
+        default=0.12,
+        help="关节误差死区(度)，误差低于该值时视为零",
     )
     parser.add_argument(
         "--fine-scale",
@@ -418,6 +558,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         effort_samples=args.effort_samples,
         effort_interval=args.effort_interval,
         effort_mode=args.effort_mode,
+        joint_speed_limits_deg=args.joint_speed_limits_deg,
+        joint_acc_limits_deg=args.joint_acc_limits_deg,
+        joint_error_deadband_deg=args.joint_error_deadband_deg,
         fine_scale=args.fine_scale,
         fine_filter_alpha=args.fine_filter_alpha,
         fine_deadband=args.fine_deadband,
