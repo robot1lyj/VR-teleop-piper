@@ -91,6 +91,21 @@
 
 > 当前方案专为局域网场景设计，默认不启用 TLS/证书，也不提供多客户端抢占逻辑。如需互联网部署或并发接入，可在此基础上扩展。 
 
+### 遥操作链路遥测
+
+- Piper 实机运行时可通过 `--telemetry-file` 记录 IK 输出、滤波后命令与实测关节角，例如：
+  ```bash
+  python scripts/run_vr_piper.py \
+    --config configs/piper_side15.json \
+    --telemetry-file output/telemetry.jsonl \
+    --telemetry-sample-measured
+  ```
+- 日志为 JSONL，每帧包含 `q_ik`、`q_cmd`、`q_meas`、`dt_send` 等字段。搭配可视化脚本快速排查链路抖动：
+  ```bash
+  python scripts/plot_telemetry.py output/telemetry.jsonl --save out/telemetry
+  ```
+- 会生成 `out/telemetry_joints.png`（IK / Command / Measured 曲线）与 `out/telemetry_dt.png`（指令间隔），便于定位抖动来源。
+
 ## VR 增量遥操作完整流程
 
 ### 依赖准备

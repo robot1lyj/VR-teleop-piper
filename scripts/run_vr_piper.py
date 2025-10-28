@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import math
 import pathlib
@@ -15,7 +16,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, TextIO, Tuple
 
 import numpy as np
 import pinocchio as pin
@@ -103,6 +104,116 @@ class JointCommandFilter:
         return pos.copy()
 
 
+class TelemetryLogger:
+    """记录 IK、命令与实测关节数据，用于离线分析。"""
+
+    def __init__(
+        self,
+        file_path: Optional[str],
+        sample_measured: bool,
+        dof: int,
+    ) -> None:
+        self._enabled = bool(file_path)
+        self._sample_measured = bool(sample_measured) and self._enabled
+        self._dof = dof
+        self._lock = threading.Lock()
+        self._pending: Dict[int, Dict[str, Any]] = {}
+        self._seq = 0
+        self._file: Optional[TextIO] = None
+        if self._enabled and file_path:
+            path = pathlib.Path(file_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = path.open("a", encoding="utf-8")
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def should_sample_measured(self) -> bool:
+        return self._sample_measured
+
+    def log_command(self, q_ik: np.ndarray, q_cmd: np.ndarray) -> Optional[int]:
+        if not self._enabled:
+            return None
+        with self._lock:
+            seq = self._seq
+            self._seq += 1
+            record = {
+                "seq": seq,
+                "ts_ik": time.time(),
+                "q_ik": np.asarray(q_ik, dtype=float).reshape(self._dof).tolist(),
+                "q_cmd": np.asarray(q_cmd, dtype=float).reshape(self._dof).tolist(),
+            }
+            self._pending[seq] = record
+            return seq
+
+    def mark_enqueued(self, seq: Optional[int], queued_monotonic: float) -> None:
+        if not self._enabled or seq is None:
+            return
+        with self._lock:
+            record = self._pending.get(seq)
+            if record is not None:
+                record["ts_enqueued_mono"] = queued_monotonic
+
+    def discard(self, seq: Optional[int]) -> None:
+        if not self._enabled or seq is None:
+            return
+        with self._lock:
+            self._pending.pop(seq, None)
+
+    def reset_pending(self) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            self._pending.clear()
+
+    def log_sent(
+        self,
+        seq: Optional[int],
+        dt_send: float,
+        write_ms: float,
+        queue_delay_ms: float,
+        q_meas: Optional[np.ndarray],
+    ) -> None:
+        if not self._enabled or seq is None:
+            return
+        with self._lock:
+            record = self._pending.pop(seq, None)
+            if record is None:
+                return
+            record.update(
+                {
+                    "ts_sent": time.time(),
+                    "dt_send": dt_send,
+                    "write_ms": write_ms,
+                    "queue_delay_ms": queue_delay_ms,
+                }
+            )
+            if q_meas is not None:
+                record["q_meas"] = np.asarray(q_meas, dtype=float).reshape(self._dof).tolist()
+            self._write_locked(record)
+
+    def close(self) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+    def _write_locked(self, record: Dict[str, Any]) -> None:
+        if not self._enabled or self._file is None:
+            return
+        try:
+            json.dump(record, self._file, ensure_ascii=False)
+            self._file.write("\n")
+            self._file.flush()
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.getLogger(__name__).warning("Telemetry write failed: %s", exc)
+
+
+
 def _coerce_limits(values: Sequence[float], dof: int, name: str) -> List[float]:
     try:
         result = [float(v) for v in values]
@@ -134,6 +245,8 @@ class PiperTeleopPipeline(TeleopPipeline):
         joint_speed_limits_deg: Sequence[float],
         joint_acc_limits_deg: Sequence[float],
         joint_error_deadband_deg: float,
+        telemetry_file: Optional[str],
+        telemetry_sample_measured: bool,
         fine_scale: Optional[float] = None,
         fine_filter_alpha: float = 0.3,
         fine_deadband: float = 0.002,
@@ -151,7 +264,7 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._fine_scale = fine_scale
         self._fine_filter_alpha = fine_filter_alpha
         self._fine_deadband = fine_deadband
-        self._pending_command: Optional[Tuple[List[float], float]] = None
+        self._pending_command: Optional[Tuple[List[float], float, Optional[int]]] = None
         self._command_lock = threading.Lock()
         self._command_event = threading.Event()
         self._stop_event = threading.Event()
@@ -179,6 +292,11 @@ class PiperTeleopPipeline(TeleopPipeline):
             max_speed_deg=speed_limits,
             max_acc_deg=accel_limits,
             error_deadband_deg=joint_error_deadband_deg,
+        )
+        self._telemetry = TelemetryLogger(
+            telemetry_file,
+            telemetry_sample_measured,
+            dof=dof_value,
         )
 
         if self.bus is not None and not self.dry_run:
@@ -209,14 +327,20 @@ class PiperTeleopPipeline(TeleopPipeline):
     def _can_command(self) -> bool:
         return self.bus is not None and not self.dry_run
 
-    def _queue_command(self, joints: Sequence[float], gripper_value: float) -> bool:
+    def _queue_command(
+        self,
+        joints: Sequence[float],
+        gripper_value: float,
+        telemetry_seq: Optional[int],
+    ) -> bool:
         if self.bus is None or self.dry_run:
             return False
         command = list(joints) + [gripper_value]
         queued_ts = time.monotonic()
         with self._command_lock:
-            self._pending_command = (command, queued_ts)
+            self._pending_command = (command, queued_ts, telemetry_seq)
             self._command_event.set()
+        self._telemetry.mark_enqueued(telemetry_seq, queued_ts)
         self._last_filtered_joints = np.asarray(joints, dtype=float).copy()
         return True
 
@@ -238,7 +362,7 @@ class PiperTeleopPipeline(TeleopPipeline):
                 self._pending_command = None
                 self._command_event.clear()
 
-            command, queued_ts = entry
+            command, queued_ts, telemetry_seq = entry
 
             if self.command_interval > 0.0:
                 now = time.monotonic()
@@ -249,9 +373,13 @@ class PiperTeleopPipeline(TeleopPipeline):
 
             start = time.perf_counter()
             queue_delay_ms = (time.monotonic() - queued_ts) * 1000.0
+            duration_ms = 0.0
+            q_meas = None
             try:
                 self.bus.write(command)
                 duration_ms = (time.perf_counter() - start) * 1000.0
+                if self._telemetry.should_sample_measured:
+                    q_meas = self._read_measured_joints()
                 with self._metrics_lock:
                     self._last_write_duration_ms = duration_ms
                     self._last_queue_delay_ms = queue_delay_ms
@@ -273,7 +401,15 @@ class PiperTeleopPipeline(TeleopPipeline):
                 logger.error("写入 Piper 指令失败: %s", exc)
             finally:
                 now = time.monotonic()
+                dt_send = 0.0 if self._last_command_ts == 0.0 else now - self._last_command_ts
                 self._last_command_ts = now
+                self._telemetry.log_sent(
+                    telemetry_seq,
+                    dt_send,
+                    duration_ms,
+                    queue_delay_ms,
+                    q_meas,
+                )
                 if self.command_interval > 0.0:
                     next_send = now + self.command_interval
 
@@ -281,8 +417,32 @@ class PiperTeleopPipeline(TeleopPipeline):
 
     def _clear_pending_command(self) -> None:
         with self._command_lock:
+            entry = self._pending_command
             self._pending_command = None
             self._command_event.clear()
+        if entry is not None:
+            _, _, telemetry_seq = entry
+            self._telemetry.discard(telemetry_seq)
+
+    def _read_measured_joints(self) -> Optional[np.ndarray]:
+        if self.bus is None:
+            return None
+        try:
+            state = self.bus.read()
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.getLogger(__name__).debug("读取实机关节失败: %s", exc)
+            return None
+        joints = [
+            state.get("joint_1"),
+            state.get("joint_2"),
+            state.get("joint_3"),
+            state.get("joint_4"),
+            state.get("joint_5"),
+            state.get("joint_6"),
+        ]
+        if any(val is None for val in joints):
+            return None
+        return np.asarray(joints, dtype=float).reshape(-1)
 
     def prime_joint_filter(self, joints: Sequence[float]) -> None:
         try:
@@ -290,6 +450,7 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._last_filtered_joints = np.asarray(joints, dtype=float).reshape(self._joint_filter.dof)
         except Exception:
             self._joint_filter.reset()
+        self._telemetry.reset_pending()
 
     def shutdown(self) -> None:
         self._stop_event.set()
@@ -299,12 +460,15 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._worker = None
         self._joint_filter.reset()
         self._last_filtered_joints = None
+        self._telemetry.reset_pending()
+        self._telemetry.close()
 
     def reset(self) -> None:  # type: ignore[override]
         super().reset()
         self._clear_pending_command()
         self._joint_filter.reset()
         self._last_filtered_joints = None
+        self._telemetry.reset_pending()
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
         results = self.session.handle_vr_payload(payload)
@@ -335,13 +499,18 @@ class PiperTeleopPipeline(TeleopPipeline):
             summary["command_joints_deg"] = [math.degrees(val) for val in filtered]
             self._last_filtered_joints = filtered.copy()
 
+            telemetry_seq = self._telemetry.log_command(joints, filtered)
+
             if self._can_command():
-                queued = self._queue_command(filtered, gripper_target)
+                queued = self._queue_command(filtered, gripper_target, telemetry_seq)
                 summary["commanded"] = queued
                 summary["queued"] = queued
+                if not queued:
+                    self._telemetry.discard(telemetry_seq)
             else:
                 summary["commanded"] = False
                 summary["queued"] = False
+                self._telemetry.discard(telemetry_seq)
 
             with self._metrics_lock:
                 if self._last_write_duration_ms is not None:
@@ -462,6 +631,16 @@ def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.A
         help="关节误差死区(度)，误差低于该值时视为零",
     )
     parser.add_argument(
+        "--telemetry-file",
+        default="",
+        help="Telemetry JSONL 输出文件路径，留空表示关闭",
+    )
+    parser.add_argument(
+        "--telemetry-sample-measured",
+        action="store_true",
+        help="启用后在发送指令后同步读取实机关节用于日志",
+    )
+    parser.add_argument(
         "--fine-scale",
         type=float,
         default=None,
@@ -561,6 +740,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         joint_speed_limits_deg=args.joint_speed_limits_deg,
         joint_acc_limits_deg=args.joint_acc_limits_deg,
         joint_error_deadband_deg=args.joint_error_deadband_deg,
+        telemetry_file=args.telemetry_file or None,
+        telemetry_sample_measured=args.telemetry_sample_measured,
         fine_scale=args.fine_scale,
         fine_filter_alpha=args.fine_filter_alpha,
         fine_deadband=args.fine_deadband,

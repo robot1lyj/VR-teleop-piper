@@ -39,6 +39,7 @@
   "fine_deadband": 0.0055,
   "joint_speed_limits_deg": [180.0, 195.0, 180.0, 225.0, 225.0, 225.0],
   "joint_acc_limits_deg": [400.0, 400.0, 400.0, 450.0, 450.0, 450.0],
+  "joint_error_deadband_deg": 0.12,
   "can_name": "can_right",
   "init_joint_position": [-25, 120.0, -100.0, -80.0, -28.0, 0,0],
   "safe_disable_position": [-25, 120.0, -100.0, -80.0, -28.0, 0,0],
