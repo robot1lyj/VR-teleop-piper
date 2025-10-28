@@ -247,9 +247,6 @@ class PiperTeleopPipeline(TeleopPipeline):
         joint_error_deadband_deg: float,
         telemetry_file: Optional[str],
         telemetry_sample_measured: bool,
-        fine_scale: Optional[float] = None,
-        fine_filter_alpha: float = 0.3,
-        fine_deadband: float = 0.002,
     ) -> None:
         super().__init__(session, allowed_hands, reference_translation, reference_rotation)
         self.bus = bus
@@ -261,9 +258,6 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._effort_samples = max(0, int(effort_samples))
         self._effort_interval = max(0.0, float(effort_interval))
         self._effort_mode = effort_mode.lower()
-        self._fine_scale = fine_scale
-        self._fine_filter_alpha = fine_filter_alpha
-        self._fine_deadband = fine_deadband
         self._pending_command: Optional[Tuple[List[float], float, Optional[int]]] = None
         self._command_lock = threading.Lock()
         self._command_event = threading.Event()
@@ -306,20 +300,6 @@ class PiperTeleopPipeline(TeleopPipeline):
                 daemon=True,
             )
             self._worker.start()
-
-        mapper = getattr(self.session, "mapper", None)
-        if mapper is not None:
-            if hasattr(mapper, "fine_filter_alpha"):
-                mapper.fine_filter_alpha = float(np.clip(self._fine_filter_alpha, 0.0, 1.0))
-            if hasattr(mapper, "fine_deadband"):
-                mapper.fine_deadband = float(max(self._fine_deadband, 0.0))
-            if hasattr(mapper, "fine_scale"):
-                if self._fine_scale is not None:
-                    mapper.fine_scale = float(self._fine_scale)
-                    if hasattr(mapper, "_fine_scale_custom"):
-                        mapper._fine_scale_custom = True
-                elif hasattr(mapper, "_fine_scale_custom") and not mapper._fine_scale_custom:
-                    mapper.fine_scale = float(min(getattr(mapper, "scale", 1.0), 1.0))
 
     def _get_gripper_target(self, closed: bool) -> float:
         return self.gripper_closed if closed else self.gripper_open
@@ -640,24 +620,6 @@ def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.A
         action="store_true",
         help="启用后在发送指令后同步读取实机关节用于日志",
     )
-    parser.add_argument(
-        "--fine-scale",
-        type=float,
-        default=None,
-        help="按住细调键时的缩放倍率（缺省为 min(scale, 1.0)）",
-    )
-    parser.add_argument(
-        "--fine-filter-alpha",
-        type=float,
-        default=0.3,
-        help="细调模式下一阶滤波系数，越小越平滑",
-    )
-    parser.add_argument(
-        "--fine-deadband",
-        type=float,
-        default=0.002,
-        help="细调模式下的死区阈值（米）",
-    )
     return parser
 
 
@@ -742,9 +704,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         joint_error_deadband_deg=args.joint_error_deadband_deg,
         telemetry_file=args.telemetry_file or None,
         telemetry_sample_measured=args.telemetry_sample_measured,
-        fine_scale=args.fine_scale,
-        fine_filter_alpha=args.fine_filter_alpha,
-        fine_deadband=args.fine_deadband,
     )
 
     if bus is not None and not args.dry_run:

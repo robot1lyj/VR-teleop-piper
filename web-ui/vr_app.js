@@ -424,7 +424,6 @@
     const buttons = Array.isArray(gamepad.buttons) ? gamepad.buttons : [];
     const triggerButton = buttons[0];
     const gripButton = buttons[1];
-    const buttonB = buttons[4] ?? buttons[3] ?? null;
 
     const readValue = (button) => {
       if (!button) return 0;
@@ -437,13 +436,10 @@
     const triggerValue = readValue(triggerButton);
     const gripValue = readValue(gripButton);
     const menuPressed = false;
-    const fineButtonPressed = buttonB ? readValue(buttonB) > 0.5 : false;
-
     return {
       gripActive: gripValue > 0.5,
       trigger: triggerValue,
       menuPressed,
-      fineButtonPressed,
     };
   }
 
@@ -459,8 +455,6 @@
       this.right = document.getElementById('rightController');
       this.lastSent = 0;
       this.scene = this.el.sceneEl || this.el;
-      this.fineToggleState = { left: false, right: false };
-      this.fineButtonPrev = { left: false, right: false };
     },
 
     tick(time, delta) {
@@ -496,19 +490,12 @@
 
       const processController = (controllerEl, handKey) => {
         if (!controllerEl || !controllerEl.object3D.visible) {
-          this.fineButtonPrev[handKey] = false;
           return null;
         }
 
         const pos = controllerEl.object3D.position;
         const quat = controllerEl.object3D.quaternion;
         const buttons = captureGamepadState(controllerEl);
-
-        const finePressed = Boolean(buttons.fineButtonPressed);
-        if (finePressed && !this.fineButtonPrev[handKey]) {
-          this.fineToggleState[handKey] = !this.fineToggleState[handKey];
-        }
-        this.fineButtonPrev[handKey] = finePressed;
 
         return {
           hand: handKey,
@@ -517,7 +504,6 @@
           gripActive: buttons.gripActive,
           trigger: buttons.trigger,
           menuPressed: buttons.menuPressed,
-          fineTuneActive: this.fineToggleState[handKey],
         };
       };
 
