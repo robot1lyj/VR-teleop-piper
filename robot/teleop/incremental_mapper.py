@@ -123,6 +123,10 @@ class IncrementalPoseMapper:
         self.reference_poses: Dict[str, Dict[str, np.ndarray]] = {}
         # 每只手柄握持时缓存一次局部坐标映射，避免重复计算。
         self.controller_frames: Dict[str, Dict[str, np.ndarray]] = {}
+        self._grip_released: Dict[str, bool] = {
+            "left": False,
+            "right": False,
+        }
 
     def set_reference_pose(self, hand: str, position: np.ndarray, rotation: np.ndarray) -> None:
         """记录机械臂当前末端位姿，作为增量累加的基准。"""
@@ -136,6 +140,7 @@ class IncrementalPoseMapper:
         rot = np.asarray(rotation, dtype=float).reshape(3, 3)
         self.reference_poses[hand] = {"position": pos, "rotation": rot}
         self.controller_frames.pop(hand, None)
+        self._grip_released[hand] = False
 
     def set_scale(self, scale: float) -> None:
         self.scale = float(scale)
@@ -148,6 +153,7 @@ class IncrementalPoseMapper:
         controller = self.controllers.get(hand)
         if controller:
             controller.reset_grip()
+        self._grip_released[hand] = False
 
     def process(self, payload: Dict[str, Any]) -> List[TeleopGoal]:
         """处理来自 WebRTC 通道的手柄报文。"""
@@ -215,6 +221,7 @@ class IncrementalPoseMapper:
 
         if not grip_active:
             if controller.grip_active:
+                self._grip_released[hand] = True
                 controller.reset_grip()
                 self.controller_frames.pop(hand, None)
             return None
@@ -286,3 +293,11 @@ class IncrementalPoseMapper:
             rotation=goal_rotation,
             gripper_closed=not controller.trigger_active,
         )
+
+    def consume_grip_release(self, hand: str) -> bool:
+        if hand not in {"left", "right"}:
+            return False
+        released = self._grip_released.get(hand, False)
+        if released:
+            self._grip_released[hand] = False
+        return released

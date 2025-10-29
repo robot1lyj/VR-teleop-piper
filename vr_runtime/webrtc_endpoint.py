@@ -236,8 +236,8 @@ class VRWebRTCServer:
                 return
 
             goals = self.pipeline.process_message(payload)
-            for goal in goals:
-                print(goal)
+            if goals:
+                logger.debug("Teleop summaries: %s", goals)
 
     async def _cleanup_peer(self) -> None:
         peer, channel = self._peer, self._channel

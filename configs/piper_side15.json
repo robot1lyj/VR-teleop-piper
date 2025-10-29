@@ -17,15 +17,15 @@
   "mount_offset": [0.0, 0.0, 0.0],
   "home_q_deg": null,
   "joint_reg_weights": [5.0, 3.0, 3.0, 5.0, 2.0, 1.0],
-  "joint_smooth_weights": [10.0, 10, 8.0, 10.0, 10, 1.0],
+  "joint_smooth_weights": [10.0, 10, 8.0, 15.0, 10, 1.0],
   "swivel_range_deg": 30,
-  "trust_region": [0.25, 0.25, 0.25, 0.2, 0.55, 0.20],
+  "trust_region": [0.25, 0.25, 0.25, 0.1, 0.55, 0.20],
   "joint_constraints": {
     "step_limits_deg": {
-      "joint4": 10
+      "joint4": 8
     },
     "hard_limits_deg": {
-      "joint4": [-100, 100]
+      "joint4": [-100, 0]
     }
   },
   "command_interval": 0.02,

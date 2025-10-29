@@ -502,7 +502,41 @@ class PiperTeleopPipeline(TeleopPipeline):
 
             summaries.append(summary)
 
+        self._handle_grip_release_events()
         return summaries
+
+    def _handle_grip_release_events(self) -> None:
+        mapper = getattr(self.session, "mapper", None)
+        if mapper is None or not hasattr(mapper, "consume_grip_release"):
+            return
+        for hand in getattr(self, "allowed_hands", []):
+            try:
+                released = mapper.consume_grip_release(hand)
+            except Exception:  # pragma: no cover - defensive
+                released = False
+            if released:
+                self._resync_after_grip_release(hand)
+
+    def _resync_after_grip_release(self, hand: str) -> None:
+        logger = logging.getLogger(__name__)
+        joints: Optional[np.ndarray] = None
+        if self._last_filtered_joints is not None:
+            joints = self._last_filtered_joints.copy()
+        else:
+            joints = self._read_measured_joints()
+
+        if joints is None:
+            logger.warning("握持释放后无法获取当前关节，跳过参考同步")
+            return
+
+        try:
+            _sync_reference_with_robot(self.session, self, joints)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("握持释放后同步参考失败: %s", exc)
+            return
+
+        self._clear_pending_command()
+        logger.info("[%s] 握持释放 -> 重置增量基准", hand)
 
 
 def _sync_reference_with_robot(
