@@ -1,7 +1,9 @@
 # VR-New 模块概览（WebRTC 版）
 
 ```
-├── __init__.py                    # 暴露 run_vr_controller_stream 入口
+├── vr_teleop_piper/               # Python 包入口，导出 run_vr_controller_stream
+│   ├── __init__.py               # import vr_teleop_piper -> ControllerPipeline
+│   └── controller_stream.py      # 兼容旧脚本的模块名
 ├── vr_runtime/                    # VR 采集/信令层（与机器人逻辑解耦）
 │   ├── __init__.py                # 导出 ControllerPipeline / VRWebRTCServer
 │   ├── controller_pipeline.py     # WebRTC 信令 CLI + ControllerPipeline 实现

@@ -46,8 +46,8 @@ class JointCommandFilter:
         dof: int,
         max_speed_deg: Sequence[float],
         max_acc_deg: Sequence[float],
-        kp: float = 9.0,
-        kd: float = 3.50,
+        kp: float = 16,
+        kd: float = 8,
         error_deadband_deg: float = 0.12,
     ) -> None:
         self.dof = dof
@@ -267,7 +267,9 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._last_queue_delay_ms: Optional[float] = None
         self._last_gripper_effort: Optional[float] = None
         self._metrics_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._last_filtered_joints: Optional[np.ndarray] = None
+        self._last_gripper_target: Optional[float] = None
 
         dof = getattr(getattr(session.ik_solver, "reduced_robot", None), "model", None)
         if dof is not None:
@@ -321,7 +323,9 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._pending_command = (command, queued_ts, telemetry_seq)
             self._command_event.set()
         self._telemetry.mark_enqueued(telemetry_seq, queued_ts)
-        self._last_filtered_joints = np.asarray(joints, dtype=float).copy()
+        with self._state_lock:
+            self._last_filtered_joints = np.asarray(joints, dtype=float).copy()
+            self._last_gripper_target = float(gripper_value)
         return True
 
     def _command_worker(self) -> None:
@@ -427,7 +431,11 @@ class PiperTeleopPipeline(TeleopPipeline):
     def prime_joint_filter(self, joints: Sequence[float]) -> None:
         try:
             self._joint_filter.prime(joints)
-            self._last_filtered_joints = np.asarray(joints, dtype=float).reshape(self._joint_filter.dof)
+            with self._state_lock:
+                self._last_filtered_joints = (
+                    np.asarray(joints, dtype=float).reshape(self._joint_filter.dof)
+                )
+                self._last_gripper_target = None
         except Exception:
             self._joint_filter.reset()
         self._telemetry.reset_pending()
@@ -439,7 +447,9 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._worker.join(timeout=1.0)
             self._worker = None
         self._joint_filter.reset()
-        self._last_filtered_joints = None
+        with self._state_lock:
+            self._last_filtered_joints = None
+            self._last_gripper_target = None
         self._telemetry.reset_pending()
         self._telemetry.close()
 
@@ -447,7 +457,9 @@ class PiperTeleopPipeline(TeleopPipeline):
         super().reset()
         self._clear_pending_command()
         self._joint_filter.reset()
-        self._last_filtered_joints = None
+        with self._state_lock:
+            self._last_filtered_joints = None
+            self._last_gripper_target = None
         self._telemetry.reset_pending()
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
@@ -477,7 +489,9 @@ class PiperTeleopPipeline(TeleopPipeline):
             filtered = self._joint_filter.step(joints)
             summary["command_joints_rad"] = filtered.tolist()
             summary["command_joints_deg"] = [math.degrees(val) for val in filtered]
-            self._last_filtered_joints = filtered.copy()
+            with self._state_lock:
+                self._last_filtered_joints = filtered.copy()
+                self._last_gripper_target = float(gripper_target)
 
             telemetry_seq = self._telemetry.log_command(joints, filtered)
 
@@ -520,9 +534,10 @@ class PiperTeleopPipeline(TeleopPipeline):
     def _resync_after_grip_release(self, hand: str) -> None:
         logger = logging.getLogger(__name__)
         joints: Optional[np.ndarray] = None
-        if self._last_filtered_joints is not None:
-            joints = self._last_filtered_joints.copy()
-        else:
+        with self._state_lock:
+            if self._last_filtered_joints is not None:
+                joints = self._last_filtered_joints.copy()
+        if joints is None:
             joints = self._read_measured_joints()
 
         if joints is None:
@@ -537,6 +552,14 @@ class PiperTeleopPipeline(TeleopPipeline):
 
         self._clear_pending_command()
         logger.info("[%s] 握持释放 -> 重置增量基准", hand)
+
+    def get_latest_command(self) -> tuple[Optional[np.ndarray], Optional[float]]:
+        """返回最近一次滤波后的关节目标与夹爪值。"""
+
+        with self._state_lock:
+            joints = None if self._last_filtered_joints is None else self._last_filtered_joints.copy()
+            gripper = self._last_gripper_target
+        return joints, gripper
 
 
 def _sync_reference_with_robot(

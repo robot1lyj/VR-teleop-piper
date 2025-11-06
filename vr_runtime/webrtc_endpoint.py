@@ -197,7 +197,11 @@ class VRWebRTCServer:
                 candidate_str,
             )
         except Exception as exc:  # pragma: no cover - aiortc 参数校验
-            logger.warning("Invalid ICE candidate payload: %s", exc)
+            logger.warning(
+                "Invalid ICE candidate payload: %s (raw=%s)",
+                exc,
+                candidate_payload or payload,
+            )
             return
         try:
             await self._peer.addIceCandidate(candidate)

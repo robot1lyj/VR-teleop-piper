@@ -9,7 +9,7 @@ import logging
 import pathlib
 import sys
 import time
-from typing import Any, Dict, Iterable, Iterator, List
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
 import numpy as np
 import pinocchio as pin
@@ -471,18 +471,12 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
     mount_rotation = _rotation_from_rpy_deg(mount_rpy_deg)
     if mount_rpy_deg is not None:
         logging.getLogger(__name__).info(
-            "应用基座安装 RPY(度)：[%.2f, %.2f, %.2f]",
-            mount_rpy_deg[0],
-            mount_rpy_deg[1],
-            mount_rpy_deg[2],
+            f"应用基座安装 RPY(度)：[{mount_rpy_deg[0]:.2f}, {mount_rpy_deg[1]:.2f}, {mount_rpy_deg[2]:.2f}]"
         )
     if mount_offset is not None:
         mount_offset = np.asarray(mount_offset, dtype=float).reshape(3)
         logging.getLogger(__name__).info(
-            "应用基座平移 (m)：[%.3f, %.3f, %.3f]",
-            mount_offset[0],
-            mount_offset[1],
-            mount_offset[2],
+            f"应用基座平移 (m)：[{mount_offset[0]:.3f}, {mount_offset[1]:.3f}, {mount_offset[2]:.3f}]"
         )
     else:
         mount_offset = np.zeros(3)
@@ -577,10 +571,12 @@ async def run_live(args: argparse.Namespace, pipeline: TeleopPipeline) -> None:
         await server.stop()
 
 
-if __name__ == "__main__":
-    argv = sys.argv[1:]
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """命令行入口：兼容脚本运行与 setuptools entry_point."""
+
+    parsed_argv = list(argv) if argv is not None else sys.argv[1:]
     config_parser = _create_config_parser()
-    config_args, remaining_argv = config_parser.parse_known_args(argv)
+    config_args, remaining_argv = config_parser.parse_known_args(parsed_argv)
     # 先解析/加载 JSON 配置，允许直接通过文件统一修改参数
     config_path = pathlib.Path(config_args.config).expanduser()
     if not config_path.is_absolute():
@@ -624,3 +620,7 @@ if __name__ == "__main__":
         _replay_trajectory_sync(session, frames, args.replay_speed, args.replay_loop)
     else:
         asyncio.run(run_live(args, pipeline))
+
+
+if __name__ == "__main__":
+    main()

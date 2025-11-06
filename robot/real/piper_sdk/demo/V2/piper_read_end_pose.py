@@ -10,8 +10,8 @@ from piper_sdk import *
 
 # 测试代码
 if __name__ == "__main__":
-    piper = C_PiperInterface_V2()
+    piper = C_PiperInterface_V2("can_right")
     piper.ConnectPort()
     while True:
         print(piper.GetArmEndPoseMsgs())
-        time.sleep(0.01)
+        time.sleep(2)
