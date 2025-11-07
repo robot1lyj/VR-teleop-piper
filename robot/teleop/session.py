@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import math
+
 import numpy as np
 import pinocchio as pin
 
@@ -37,6 +39,23 @@ class ArmTeleopSession:
         self.ik_solver = ik_solver
         self.mapper = mapper or IncrementalPoseMapper()
         self.check_collision = bool(check_collision)
+        model = self.ik_solver.reduced_robot.model
+        self._joint_lower = model.lowerPositionLimit.copy()
+        self._joint_upper = model.upperPositionLimit.copy()
+        constraint_manager = getattr(self.ik_solver, "constraint_manager", None)
+        if constraint_manager is not None:
+            hard_lower = getattr(constraint_manager, "_hard_lower", None)
+            hard_upper = getattr(constraint_manager, "_hard_upper", None)
+            if isinstance(hard_lower, np.ndarray):
+                self._joint_lower = np.maximum(self._joint_lower, hard_lower)
+            if isinstance(hard_upper, np.ndarray):
+                finite = np.isfinite(hard_upper)
+                upper = self._joint_upper.copy()
+                upper[finite] = np.minimum(upper[finite], hard_upper[finite])
+                self._joint_upper = upper
+
+        self._wrist_indices = self._resolve_wrist_indices(model)
+        self._last_wrist: Dict[str, np.ndarray] = {}
 
     def set_reference_pose(self, hand: str, position: np.ndarray, rotation: np.ndarray) -> None:
         """更新某只手柄对应的末端基准位姿。"""
@@ -83,6 +102,9 @@ class ArmTeleopSession:
             else:
                 joints_array = np.asarray(joints, dtype=float).reshape(-1)
 
+            if success and joints_array is not None:
+                joints_array = self._stabilize_wrist_branch(goal.hand, joints_array)
+
             results.append(
                 TeleopResult(
                     hand=goal.hand,
@@ -95,3 +117,57 @@ class ArmTeleopSession:
             )
 
         return results
+
+    @staticmethod
+    def _wrap_angle(value: float) -> float:
+        return (value + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _resolve_wrist_indices(self, model: pin.Model) -> List[int]:
+        indices: List[int] = []
+        for name in ("joint4", "joint5", "joint6"):
+            joint_id = model.getJointId(name)
+            if joint_id <= 0:
+                continue
+            joint = model.joints[joint_id]
+            if joint.nq != 1:
+                continue
+            indices.append(joint.idx_q)
+        return indices
+
+    def _stabilize_wrist_branch(self, hand: str, joints: np.ndarray) -> np.ndarray:
+        if len(self._wrist_indices) != 3:
+            return joints
+        wrist = joints[self._wrist_indices].copy()
+        candidates = [wrist]
+
+        flipped = wrist.copy()
+        flipped[0] = self._wrap_angle(flipped[0] + math.pi)
+        flipped[1] = -flipped[1]
+        flipped[2] = self._wrap_angle(flipped[2] + math.pi)
+        candidates.append(flipped)
+
+        lower = self._joint_lower[self._wrist_indices]
+        upper = self._joint_upper[self._wrist_indices]
+
+        prev = self._last_wrist.get(hand)
+        best = None
+        best_cost = float("inf")
+        for cand in candidates:
+            if np.any(cand < lower) or np.any(cand > upper):
+                continue
+            if prev is None:
+                best = cand
+                break
+            cost = np.linalg.norm(cand - prev)
+            if cost < best_cost:
+                best_cost = cost
+                best = cand
+
+        if best is None:
+            best = wrist
+
+        for offset, idx in enumerate(self._wrist_indices):
+            joints[idx] = best[offset]
+
+        self._last_wrist[hand] = best.copy()
+        return joints

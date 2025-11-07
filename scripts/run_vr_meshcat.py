@@ -487,7 +487,7 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         urdf_path=args.urdf,
         enable_viewer=not args.no_meshcat,
         smooth_weight=0.05,
-        position_weight=20.0,
+        position_weight=40.0,
         orientation_weight=20.0,
         joint_reg_weights=reg_weights,
         joint_smooth_weights=smooth_weights,
