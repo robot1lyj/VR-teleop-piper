@@ -270,16 +270,36 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._state_lock = threading.Lock()
         self._last_filtered_joints: Optional[np.ndarray] = None
         self._last_gripper_target: Optional[float] = None
+        self._joint_lower: Optional[np.ndarray] = None
+        self._joint_upper: Optional[np.ndarray] = None
+        self._pitch_joint_index = 4  # joint5 (0-based)
+        self._pitch_mode_active = False
+        self._pitch_base_joints: Optional[np.ndarray] = None
+        self._pitch_base_angle: float = 0.0
 
         dof = getattr(getattr(session.ik_solver, "reduced_robot", None), "model", None)
         if dof is not None:
             dof_value = getattr(dof, "nq", None)
+            lower = getattr(dof, "lowerPositionLimit", None)
+            upper = getattr(dof, "upperPositionLimit", None)
+            if lower is not None:
+                self._joint_lower = np.asarray(lower, dtype=float).copy()
+            if upper is not None:
+                self._joint_upper = np.asarray(upper, dtype=float).copy()
         else:
             dof_value = None
         if not isinstance(dof_value, int) or dof_value <= 0:
             dof_value = len(getattr(session.ik_solver, "q_seed", []))
         if dof_value <= 0:
             dof_value = 6
+        if self._joint_lower is None or self._joint_upper is None:
+            try:
+                model = session.ik_solver.reduced_robot.model
+                self._joint_lower = np.asarray(model.lowerPositionLimit, dtype=float).copy()
+                self._joint_upper = np.asarray(model.upperPositionLimit, dtype=float).copy()
+            except Exception:
+                self._joint_lower = np.full(dof_value, -np.inf, dtype=float)
+                self._joint_upper = np.full(dof_value, np.inf, dtype=float)
 
         speed_limits = _coerce_limits(joint_speed_limits_deg, dof_value, "joint_speed_limits_deg")
         accel_limits = _coerce_limits(joint_acc_limits_deg, dof_value, "joint_acc_limits_deg")
@@ -472,13 +492,24 @@ class PiperTeleopPipeline(TeleopPipeline):
                 "info": item.info,
                 "gripper_closed": item.gripper_closed,
             }
+            if item.pitch_mode:
+                summary["pitch_mode"] = True
+                joints = self._build_pitch_joints(item.pitch_angle)
+                if joints is None:
+                    summary["commanded"] = False
+                    summaries.append(summary)
+                    continue
+            else:
+                self._pitch_mode_active = False
+                self._pitch_base_joints = None
+                self._pitch_base_angle = 0.0
 
-            if not item.success or item.joints is None:
-                summary["commanded"] = False
-                summaries.append(summary)
-                continue
+                if not item.success or item.joints is None:
+                    summary["commanded"] = False
+                    summaries.append(summary)
+                    continue
 
-            joints = np.asarray(item.joints, dtype=float).reshape(-1)
+                joints = np.asarray(item.joints, dtype=float).reshape(-1)
             summary["ik_joints_rad"] = joints.tolist()
             summary["ik_joints_deg"] = [math.degrees(val) for val in joints]
             summary["target_joints_rad"] = summary["ik_joints_rad"]
@@ -518,6 +549,37 @@ class PiperTeleopPipeline(TeleopPipeline):
 
         self._handle_grip_release_events()
         return summaries
+
+    def _build_pitch_joints(self, pitch_angle: Optional[float]) -> Optional[np.ndarray]:
+        if pitch_angle is None:
+            pitch_angle = 0.0
+        if not self._pitch_mode_active:
+            base = self._get_pitch_base()
+            if base is None:
+                return None
+            self._pitch_base_joints = base.copy()
+            self._pitch_base_angle = base[self._pitch_joint_index]
+            self._pitch_mode_active = True
+
+        if self._pitch_base_joints is None:
+            return None
+
+        lower = -np.inf
+        upper = np.inf
+        if self._joint_lower is not None and self._joint_upper is not None:
+            lower = float(self._joint_lower[self._pitch_joint_index])
+            upper = float(self._joint_upper[self._pitch_joint_index])
+
+        target = self._pitch_base_joints.copy()
+        target_angle = np.clip(self._pitch_base_angle + pitch_angle, lower, upper)
+        target[self._pitch_joint_index] = target_angle
+        return target
+
+    def _get_pitch_base(self) -> Optional[np.ndarray]:
+        with self._state_lock:
+            if self._last_filtered_joints is not None:
+                return self._last_filtered_joints.copy()
+        return self._read_measured_joints()
 
     def _handle_grip_release_events(self) -> None:
         mapper = getattr(self.session, "mapper", None)

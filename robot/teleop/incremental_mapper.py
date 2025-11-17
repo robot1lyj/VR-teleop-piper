@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
+import pinocchio as pin
 
 from vr_runtime.controller_state import ControllerState
 
@@ -28,6 +29,8 @@ class TeleopGoal:
     position: np.ndarray  # 机械臂基座系下的末端位置
     rotation: np.ndarray  # 机械臂基座系下的末端旋转矩阵
     gripper_closed: bool
+    pitch_mode: bool = False
+    pitch_angle: float = 0.0  # 仅在 pitch_mode 时生效（弧度）
 
 
 def _quaternion_from_payload(payload: Dict[str, float]) -> np.ndarray:
@@ -127,6 +130,11 @@ class IncrementalPoseMapper:
             "left": False,
             "right": False,
         }
+        self._pitch_states: Dict[str, Dict[str, Any]] = {
+            "left": {"active": False},
+            "right": {"active": False},
+        }
+        self._pitch_angle_limit = np.deg2rad(80.0)
 
     def set_reference_pose(self, hand: str, position: np.ndarray, rotation: np.ndarray) -> None:
         """记录机械臂当前末端位姿，作为增量累加的基准。"""
@@ -216,6 +224,7 @@ class IncrementalPoseMapper:
         trigger_value = float(payload.get("trigger", 0.0))
         trigger_active = trigger_value > 0.5
         controller.trigger_active = trigger_active
+        controller.menu_active = bool(payload.get("menuPressed", False))
         if position is None:
             return None
 
@@ -224,6 +233,7 @@ class IncrementalPoseMapper:
                 self._grip_released[hand] = True
                 controller.reset_grip()
                 self.controller_frames.pop(hand, None)
+                self._pitch_states[hand] = {"active": False}
             return None
 
         position_vec = np.array(
@@ -287,11 +297,21 @@ class IncrementalPoseMapper:
             rot_rel_base = self.rotation_vr_to_base @ rot_rel_vr @ self.rotation_base_to_vr
             goal_rotation = reference["rotation"] @ rot_rel_base
 
+        goal_position, goal_rotation, pitch_active, pitch_angle = self._apply_pitch_mode(
+            hand,
+            controller,
+            goal_position,
+            goal_rotation,
+            quaternion_payload is not None,
+        )
+
         return TeleopGoal(
             hand=hand,
             position=goal_position,
             rotation=goal_rotation,
             gripper_closed=not controller.trigger_active,
+            pitch_mode=pitch_active,
+            pitch_angle=pitch_angle,
         )
 
     def consume_grip_release(self, hand: str) -> bool:
@@ -301,3 +321,54 @@ class IncrementalPoseMapper:
         if released:
             self._grip_released[hand] = False
         return released
+
+    def _apply_pitch_mode(
+        self,
+        hand: str,
+        controller: ControllerState,
+        goal_position: np.ndarray,
+        goal_rotation: np.ndarray,
+        has_orientation: bool,
+    ) -> tuple[np.ndarray, np.ndarray, bool, float]:
+        state = self._pitch_states[hand]
+        active = bool(state.get("active"))
+        if controller.menu_active:
+            if not active:
+                state["active"] = True
+                state["ref_position"] = goal_position.copy()
+                state["ref_rotation"] = goal_rotation.copy()
+                state["pitch_angle"] = 0.0
+                if has_orientation and controller.accumulated_quaternion is not None:
+                    state["controller_origin"] = _quaternion_to_matrix(controller.accumulated_quaternion)
+                else:
+                    state["controller_origin"] = None
+                return state["ref_position"], state["ref_rotation"], True, 0.0
+
+            ref_pos = state.get("ref_position")
+            ref_rot = state.get("ref_rotation")
+            if ref_pos is None or ref_rot is None:
+                return goal_position, goal_rotation, False, 0.0
+            controller_origin = state.get("controller_origin")
+            if controller_origin is None or controller.accumulated_quaternion is None:
+                return ref_pos, ref_rot, True, 0.0
+            vr_now = _quaternion_to_matrix(controller.accumulated_quaternion)
+            rel = controller_origin.T @ vr_now
+            try:
+                omega = pin.log3(rel)
+            except Exception:  # pragma: no cover
+                omega = np.zeros(3)
+            pitch_angle = float(np.clip(omega[0], -self._pitch_angle_limit, self._pitch_angle_limit))
+            axis_tool = ref_rot[:, 1]
+            rot_vec = axis_tool * pitch_angle
+            try:
+                rot_pitch = pin.exp3(rot_vec)
+            except Exception:  # pragma: no cover
+                rot_pitch = np.eye(3)
+            new_rot = ref_rot @ rot_pitch
+            state["pitch_angle"] = pitch_angle
+            return ref_pos, new_rot, True, pitch_angle
+
+        if active:
+            state.clear()
+            state["active"] = False
+        return goal_position, goal_rotation, False, 0.0

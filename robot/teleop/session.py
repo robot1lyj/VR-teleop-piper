@@ -25,6 +25,8 @@ class TeleopResult:
     joints: Optional[np.ndarray]
     target: pin.SE3
     gripper_closed: bool
+    pitch_mode: bool = False
+    pitch_angle: Optional[float] = None
 
 
 class ArmTeleopSession:
@@ -94,6 +96,22 @@ class ArmTeleopSession:
         for goal in goals:
             self.ik_solver.set_gripper_state(goal.gripper_closed)
             target = pin.SE3(goal.rotation, goal.position)
+
+            if goal.pitch_mode:
+                results.append(
+                    TeleopResult(
+                        hand=goal.hand,
+                        success=True,
+                        info="pitch-mode",
+                        joints=None,
+                        target=target,
+                        gripper_closed=goal.gripper_closed,
+                        pitch_mode=True,
+                        pitch_angle=goal.pitch_angle,
+                    )
+                )
+                continue
+
             joints, success, info = self.ik_solver.solve(target, check_collision=self.check_collision)
             if isinstance(joints, np.ndarray):
                 joints_array: Optional[np.ndarray] = joints.copy()

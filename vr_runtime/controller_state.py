@@ -40,6 +40,7 @@ class ControllerState:
 
     z_axis_rotation: float = 0.0
     x_axis_rotation: float = 0.0
+    menu_active: bool = False
 
     def reset_grip(self) -> None:
         """重置握持相关状态，在松开握持键或断开连接时调用。"""
@@ -50,6 +51,7 @@ class ControllerState:
         self.accumulated_quaternion = None
         self.z_axis_rotation = 0.0
         self.x_axis_rotation = 0.0
+        self.menu_active = False
 
 
 # 两个全局实例分别跟踪左右手柄的状态，供服务器循环复用。

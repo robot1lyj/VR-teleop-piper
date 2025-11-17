@@ -25,7 +25,8 @@
       "joint4": 8
     },
     "hard_limits_deg": {
-      "joint4": [-100, 0]
+      "joint4": [-90, -70],
+      "joint6": [-60, -40]
     }
   },
   "command_interval": 0.02,

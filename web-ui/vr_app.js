@@ -424,6 +424,7 @@
     const buttons = Array.isArray(gamepad.buttons) ? gamepad.buttons : [];
     const triggerButton = buttons[0];
     const gripButton = buttons[1];
+    const primaryButton = buttons[4] || buttons[3];
 
     const readValue = (button) => {
       if (!button) return 0;
@@ -435,7 +436,7 @@
 
     const triggerValue = readValue(triggerButton);
     const gripValue = readValue(gripButton);
-    const menuPressed = false;
+    const menuPressed = Boolean(primaryButton && primaryButton.pressed);
     return {
       gripActive: gripValue > 0.5,
       trigger: triggerValue,
@@ -496,6 +497,7 @@
         const pos = controllerEl.object3D.position;
         const quat = controllerEl.object3D.quaternion;
         const buttons = captureGamepadState(controllerEl);
+        // menuPressed 来源于 XR primary button（Quest 上是 A 键，buttons[4]，兼容旧 buttons[3]）
 
         return {
           hand: handKey,
