@@ -1,3 +1,5 @@
+"""Piper 实机 CAN 控制封装，负责桥接 JSON 配置与 Piper SDK 调用。"""
+
 import json
 import math
 import time
@@ -53,7 +55,10 @@ def _degrees_to_internal(values: List[float]) -> List[float]:
     return converted
 
 
-def _load_piper_config(config_path: str | Path | None) -> Dict[str, Any]:
+def _load_piper_config(
+    config_path: str | Path | None,
+    overrides: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """读取 Piper 配置文件，补全缺省值并校验关键字段。"""
 
     defaults: Dict[str, Any] = {
@@ -77,6 +82,9 @@ def _load_piper_config(config_path: str | Path | None) -> Dict[str, Any]:
         raise ValueError(f"Piper 配置文件必须是 JSON 对象: {path}")
 
     config: Dict[str, Any] = defaults | loaded
+    if overrides:
+        for key, value in overrides.items():
+            config[key] = value
 
     can_name = config.get("can_name")
     if not isinstance(can_name, str) or not can_name.strip():
@@ -105,8 +113,12 @@ def _load_piper_config(config_path: str | Path | None) -> Dict[str, Any]:
 class PiperMotorsBus:
     """对 Piper SDK 的二次封装，参数可通过 JSON 配置覆盖。"""
 
-    def __init__(self, config_path: str | Path | None = None):
-        config = _load_piper_config(config_path)
+    def __init__(
+        self,
+        config_path: str | Path | None = None,
+        overrides: Dict[str, Any] | None = None,
+    ):
+        config = _load_piper_config(config_path, overrides)
 
         self.config = config
         self.config_path = config["config_path"]
@@ -127,6 +139,8 @@ class PiperMotorsBus:
 
 
     def _read_enable_flags(self) -> List[bool]:
+        """读取 6 个关节驱动的上电状态，供上电流程轮询。"""
+
         info = self.piper.GetArmLowSpdInfoMsgs()
         return [
             bool(info.motor_1.foc_status.driver_enable_status),
@@ -137,10 +151,16 @@ class PiperMotorsBus:
             bool(info.motor_6.foc_status.driver_enable_status),
         ]
 
-    def connect(self, enable:bool=True) -> bool:
-        '''
-            使能机械臂并检测使能状态,尝试5s,如果使能超时则退出程序
-        '''
+    def connect(self, enable: bool = True) -> bool:
+        """上电或断电 Piper。
+
+        Args:
+            enable: ``True`` 表示依次上电六个关节并启动夹爪，``False`` 则执行软断电。
+
+        Returns:
+            bool: 在超时前完成目标状态返回 True，否则 False。
+        """
+
         timeout = 5.0
         interval = 0.2
         deadline = time.time() + timeout
@@ -183,19 +203,22 @@ class PiperMotorsBus:
 
 
     def set_calibration(self):
+        """保留的校准接口，预留给未来流程。"""
+
         return
-    
+
     def revert_calibration(self):
+        """恢复校准的占位函数，当前硬件版本无需实现。"""
+
         return
 
     def apply_calibration(self):
-        """
-            移动到初始位置
-        """
+        """将机械臂移动到配置中指定的初始关节角，常用于回零或安全待命。"""
+
         self.write(target_joint=self.init_joint_position)
 
     def write(self, target_joint: List[float]) -> None:
-        """Joint control（输入单位为弧度，内部自动转换成 0.001°）。"""
+        """写入 6 轴+夹爪目标（弧度/米），内部转换为 Piper SDK 期望的 0.001° 单位。"""
 
         if len(target_joint) != 7:
             raise ValueError("target_joint 长度必须为 7 (6 轴 + 夹爪)")
@@ -299,7 +322,6 @@ class PiperMotorsBus:
         return list(self._effort_history)
     
     def safe_disconnect(self):
-        """ 
-            Move to safe disconnect position
-        """
+        """在断电/急停前移动到更安全的姿态，避免姿态突变。"""
+
         self.write(target_joint=self.safe_disable_position)

@@ -1,9 +1,6 @@
 # VR-New 模块概览（WebRTC 版）
 
 ```
-├── vr_teleop_piper/               # Python 包入口，导出 run_vr_controller_stream
-│   ├── __init__.py               # import vr_teleop_piper -> ControllerPipeline
-│   └── controller_stream.py      # 兼容旧脚本的模块名
 ├── vr_runtime/                    # VR 采集/信令层（与机器人逻辑解耦）
 │   ├── __init__.py                # 导出 ControllerPipeline / VRWebRTCServer
 │   ├── controller_pipeline.py     # WebRTC 信令 CLI + ControllerPipeline 实现
@@ -304,8 +301,13 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
 
   # 若需自定义另一套配置，可共享同一个 JSON
   python scripts/run_vr_piper.py --config configs/run_vr_meshcat_side30.json
+
+  # 双臂示例：镜像安装、can_left/can_right（会自动启用 --hands both）
+  python scripts/run_vr_piper.py \
+      --config configs/piper_teleop_dual.json \
+      --piper-config configs/piper_teleop_dual.json
   ```
-  该脚本会复用 `run_vr_meshcat.py` 的 IK/映射设置，按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，并在 DataChannel 回调里将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open/--effort-samples` 等参数即可调整指令频率、手爪目标和扭矩采样策略；未显式指定 `--piper-config` 时会默认复用 `--config` 所指向的同一份 JSON。
+  该脚本会复用 `run_vr_meshcat.py` 的 IK/映射设置，并按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，再由 `scripts/piper_pipeline.py` 中的多臂 `PiperTeleopPipeline` 将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open/--effort-samples` 等参数即可调整指令频率、手爪目标和扭矩采样策略；当配置文件内包含 `piper_arms.left/right` 字段时，脚本会自动为每只手臂构造独立的 CAN 总线、遥测与滤波。若未显式指定 `--piper-config`，依旧会默认复用 `--config` 所指向的 JSON。
 - 遥操作链路默认启用了两段滤波：`pose_filter_*` 参数（窗口 0.8 s、二阶拟合）在 `IncrementalPoseMapper` 中对 VR 位姿做时间窗平滑+前视预测，`velocity_filter_window`（默认 5 帧）则用于在关节空间平均速度并作为 `JointCommandFilter` 的前馈，进一步抑制加速度冲击。需要更灵敏或更平滑时，可在命令行传 `--pose-filter-window-sec / --velocity-filter-window` 或直接修改 `configs/piper_teleop.json` / `configs/piper_recording.json`，同时 `joint_speed_limits_deg` / `joint_acc_limits_deg` 仍由配置控制，确保机械臂速度限制可一致管理。
 - 若需要手动对接或进一步定制，可继续参考 `ArmTeleopSession` / `IncrementalPoseMapper` 的组合：
   1. `PiperMotorsBus.connect()` 使能 → `apply_calibration()` 对齐零位。

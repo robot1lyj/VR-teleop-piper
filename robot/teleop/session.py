@@ -138,9 +138,13 @@ class ArmTeleopSession:
 
     @staticmethod
     def _wrap_angle(value: float) -> float:
+        """将任意角度值约束到 ``[-pi, pi)``，避免腕部反复跨越 2π。"""
+
         return (value + math.pi) % (2.0 * math.pi) - math.pi
 
     def _resolve_wrist_indices(self, model: pin.Model) -> List[int]:
+        """在 Pinocchio 模型中查找腕部 3 轴的下标，便于在求解后单独处理。"""
+
         indices: List[int] = []
         for name in ("joint4", "joint5", "joint6"):
             joint_id = model.getJointId(name)
@@ -153,6 +157,8 @@ class ArmTeleopSession:
         return indices
 
     def _stabilize_wrist_branch(self, hand: str, joints: np.ndarray) -> np.ndarray:
+        """选择与上一帧最接近的腕部分支，避免奇异点造成突然翻转。"""
+
         if len(self._wrist_indices) != 3:
             return joints
         wrist = joints[self._wrist_indices].copy()

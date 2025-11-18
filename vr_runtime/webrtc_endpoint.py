@@ -54,6 +54,8 @@ class VRWebRTCServer:
         self._client_lock = asyncio.Lock()
 
     async def start(self) -> None:
+        """启动 WebSocket 信令服务器并等待浏览器端 Offer。"""
+
         if self._server is not None:
             raise RuntimeError("Server already started")
 
@@ -71,6 +73,8 @@ class VRWebRTCServer:
         )
 
     async def stop(self) -> None:
+        """关闭信令服务器与当前会话，通常在程序退出时调用。"""
+
         await self._cleanup_peer()
         if self._server:
             self._server.close()
@@ -79,6 +83,8 @@ class VRWebRTCServer:
         logger.info("WebRTC signaling server stopped")
 
     async def _handle_signaling(self, websocket: WebSocketServerProtocol) -> None:
+        """串行处理单客户端的信令交换，防止并发会话。"""
+
         async with self._client_lock:
             if self._websocket is not None:
                 await websocket.send(self._busy_message)
@@ -98,6 +104,8 @@ class VRWebRTCServer:
             await self._cleanup_peer()
 
     async def _dispatch_signal(self, message: str) -> None:
+        """解析字符串信令消息并根据 type 字段分派。"""
+
         try:
             payload = json.loads(message)
         except json.JSONDecodeError:
@@ -115,6 +123,8 @@ class VRWebRTCServer:
             logger.warning("Unsupported signaling message type: %s", msg_type)
 
     async def _accept_offer(self, sdp: Optional[str]) -> None:
+        """收到浏览器 Offer 后创建 RTCPeerConnection 并回复 Answer。"""
+
         if not sdp:
             logger.warning("Offer message missing SDP")
             return
@@ -166,6 +176,8 @@ class VRWebRTCServer:
             await self._send_signal({"type": peer.localDescription.type, "sdp": peer.localDescription.sdp})
 
     async def _add_remote_candidate(self, payload: Dict[str, Any]) -> None:
+        """处理来自浏览器的 ICE candidate，逐条喂给 aiortc。"""
+
         if not self._peer:
             logger.warning("Received ICE candidate without active peer")
             return
@@ -209,6 +221,8 @@ class VRWebRTCServer:
             logger.warning("Failed to add ICE candidate: %s", exc)
 
     def _attach_channel(self, channel: RTCDataChannel) -> None:
+        """在 DataChannel ready 时挂钩 open/close/message 事件。"""
+
         self._channel = channel
 
         @channel.on("open")
@@ -244,6 +258,8 @@ class VRWebRTCServer:
                 logger.debug("Teleop summaries: %s", goals)
 
     async def _cleanup_peer(self) -> None:
+        """关闭当前 WebRTC 会话并重置遥操作状态。"""
+
         peer, channel = self._peer, self._channel
         self._peer = None
         self._channel = None
@@ -263,12 +279,16 @@ class VRWebRTCServer:
         self.pipeline.reset()
 
     def _build_configuration(self) -> Optional[RTCConfiguration]:
+        """根据 CLI 指定的 STUN 列表生成 aiortc 配置对象。"""
+
         if not self.stun_servers:
             return RTCConfiguration(iceServers=[])
         ice_servers = [RTCIceServer(urls=self.stun_servers)]
         return RTCConfiguration(iceServers=ice_servers)
 
     async def _send_signal(self, message: Dict[str, Any]) -> None:
+        """将信令字典转成 JSON 并通过 websocket 发送给浏览器。"""
+
         websocket = self._websocket
         if websocket is None:
             logger.warning("Cannot send signaling message, websocket missing")

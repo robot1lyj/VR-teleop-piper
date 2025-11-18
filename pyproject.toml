@@ -30,7 +30,6 @@ preview-mount-pose = "scripts.preview_mount_pose:main"
 
 [tool.setuptools.packages.find]
 include = [
-    "vr_teleop_piper*",
     "vr_runtime*",
     "robot*",
     "lerobot*",
