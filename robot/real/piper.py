@@ -10,7 +10,7 @@ from piper_sdk import *
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "piper.json"
+DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "piper_teleop.json"
 
 
 def _resolve_config_path(config_path: str | Path | None) -> Path:

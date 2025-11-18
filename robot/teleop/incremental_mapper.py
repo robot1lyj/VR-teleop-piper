@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pinocchio as pin
@@ -19,6 +22,117 @@ R_BV_DEFAULT = np.array(
     ],
     dtype=float,
 )
+
+
+class PoseHistoryFilter:
+    """基于时间窗的多项式拟合，用历史帧平滑位置/姿态。"""
+
+    def __init__(
+        self,
+        window_sec: float,
+        degree: int,
+        min_samples: int,
+        lookahead_sec: float,
+    ) -> None:
+        self.enabled = window_sec > 0.0
+        self.window_sec = max(0.0, float(window_sec))
+        self.degree = max(1, int(degree))
+        required = max(self.degree + 1, int(min_samples))
+        self.min_samples = max(required, 3)
+        self.lookahead_sec = max(0.0, float(lookahead_sec))
+        self._samples: Deque[Tuple[float, np.ndarray, Optional[np.ndarray]]] = deque()
+
+    def filter_sample(
+        self,
+        timestamp: float,
+        position: np.ndarray,
+        quaternion: Optional[np.ndarray],
+    ) -> tuple[np.ndarray, Optional[np.ndarray]]:
+        if not self.enabled:
+            return position, quaternion
+
+        pos = np.asarray(position, dtype=float).reshape(3)
+        quat = None if quaternion is None else np.asarray(quaternion, dtype=float).reshape(4)
+        self._samples.append((timestamp, pos, quat))
+        self._trim(timestamp)
+
+        filtered_pos = self._smooth_positions()
+        filtered_rot = self._smooth_orientation()
+        return filtered_pos if filtered_pos is not None else pos, filtered_rot if filtered_rot is not None else quat
+
+    def _trim(self, latest_ts: float) -> None:
+        if not self.enabled or self.window_sec <= 0.0:
+            return
+        while self._samples and latest_ts - self._samples[0][0] > self.window_sec:
+            self._samples.popleft()
+
+    def _relative_times(self) -> np.ndarray:
+        times = np.array([sample[0] for sample in self._samples], dtype=float)
+        if times.size == 0:
+            return times
+        times -= times[-1]
+        return times
+
+    def _fit_series(
+        self,
+        times: np.ndarray,
+        values: np.ndarray,
+        lookahead: float,
+    ) -> Optional[np.ndarray]:
+        if times.size == 0 or values.shape[0] == 0:
+            return None
+        degree = min(self.degree, values.shape[0] - 1)
+        if degree <= 0:
+            return values[-1]
+        try:
+            coeffs = np.polyfit(times, values, deg=degree)
+            result = np.polyval(coeffs, lookahead)
+            return result
+        except Exception:
+            return None
+
+    def _smooth_positions(self) -> Optional[np.ndarray]:
+        if len(self._samples) < self.min_samples:
+            return None
+        rel_times = self._relative_times()
+        values = np.stack([sample[1] for sample in self._samples], axis=0)
+        result = np.empty(3, dtype=float)
+        for axis in range(3):
+            fitted = self._fit_series(rel_times, values[:, axis], self.lookahead_sec)
+            if fitted is None:
+                return None
+            result[axis] = fitted
+        return result
+
+    def _smooth_orientation(self) -> Optional[np.ndarray]:
+        rotation_vectors: List[np.ndarray] = []
+        times: List[float] = []
+        rel_times = self._relative_times()
+        for idx, sample in enumerate(self._samples):
+            quat = sample[2]
+            if quat is None:
+                continue
+            try:
+                rot_vec = pin.log3(_quaternion_to_matrix(quat))
+            except Exception:
+                continue
+            rotation_vectors.append(rot_vec)
+            times.append(rel_times[idx])
+        if len(rotation_vectors) < max(self.min_samples, self.degree + 1):
+            return None
+        values = np.stack(rotation_vectors, axis=0)
+        times_arr = np.array(times, dtype=float)
+        fitted = np.empty(3, dtype=float)
+        for axis in range(3):
+            axis_fit = self._fit_series(times_arr, values[:, axis], self.lookahead_sec)
+            if axis_fit is None:
+                return None
+            fitted[axis] = axis_fit
+        try:
+            rot_matrix = pin.exp3(fitted)
+        except Exception:
+            return None
+        return _matrix_to_quaternion(rot_matrix)
 
 
 @dataclass
@@ -100,6 +214,41 @@ def _quaternion_to_matrix(quat: np.ndarray) -> np.ndarray:
     )
 
 
+def _matrix_to_quaternion(matrix: np.ndarray) -> np.ndarray:
+    mat = np.asarray(matrix, dtype=float).reshape(3, 3)
+    trace = float(np.trace(mat))
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (mat[2, 1] - mat[1, 2]) / s
+        y = (mat[0, 2] - mat[2, 0]) / s
+        z = (mat[1, 0] - mat[0, 1]) / s
+    else:
+        if mat[0, 0] > mat[1, 1] and mat[0, 0] > mat[2, 2]:
+            s = math.sqrt(max(0.0, 1.0 + mat[0, 0] - mat[1, 1] - mat[2, 2])) * 2.0
+            x = 0.25 * s
+            y = (mat[0, 1] + mat[1, 0]) / s
+            z = (mat[0, 2] + mat[2, 0]) / s
+            w = (mat[2, 1] - mat[1, 2]) / s
+        elif mat[1, 1] > mat[2, 2]:
+            s = math.sqrt(max(0.0, 1.0 + mat[1, 1] - mat[0, 0] - mat[2, 2])) * 2.0
+            x = (mat[0, 1] + mat[1, 0]) / s
+            y = 0.25 * s
+            z = (mat[1, 2] + mat[2, 1]) / s
+            w = (mat[0, 2] - mat[2, 0]) / s
+        else:
+            s = math.sqrt(max(0.0, 1.0 + mat[2, 2] - mat[0, 0] - mat[1, 1])) * 2.0
+            x = (mat[0, 2] + mat[2, 0]) / s
+            y = (mat[1, 2] + mat[2, 1]) / s
+            z = 0.25 * s
+            w = (mat[1, 0] - mat[0, 1]) / s
+    quat = np.array([x, y, z, w], dtype=float)
+    norm = np.linalg.norm(quat)
+    if norm <= 0.0:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+    return quat / norm
+
+
 class IncrementalPoseMapper:
     """将 VR 手柄增量映射到机械臂基座系。"""
 
@@ -108,6 +257,10 @@ class IncrementalPoseMapper:
         scale: float = 1.0,
         allowed_hands: Optional[Iterable[str]] = None,
         rotation_vr_to_base: np.ndarray = R_BV_DEFAULT,
+        pose_filter_window_sec: float = 0.0,
+        pose_filter_degree: int = 2,
+        pose_filter_min_samples: int = 15,
+        pose_filter_lookahead_sec: float = 0.02,
     ) -> None:
         allowed_set = set(allowed_hands or {"left", "right"})
         invalid = allowed_set - {"left", "right"}
@@ -126,6 +279,15 @@ class IncrementalPoseMapper:
         self.reference_poses: Dict[str, Dict[str, np.ndarray]] = {}
         # 每只手柄握持时缓存一次局部坐标映射，避免重复计算。
         self.controller_frames: Dict[str, Dict[str, np.ndarray]] = {}
+        self._pose_filters: Dict[str, PoseHistoryFilter] = {}
+        if pose_filter_window_sec > 0.0:
+            for hand in self.allowed_hands:
+                self._pose_filters[hand] = PoseHistoryFilter(
+                    window_sec=pose_filter_window_sec,
+                    degree=pose_filter_degree,
+                    min_samples=pose_filter_min_samples,
+                    lookahead_sec=pose_filter_lookahead_sec,
+                )
         self._grip_released: Dict[str, bool] = {
             "left": False,
             "right": False,
@@ -220,6 +382,7 @@ class IncrementalPoseMapper:
 
         position = payload.get("position")
         quaternion_payload = payload.get("quaternion")
+        quaternion_array = _quaternion_from_payload(quaternion_payload) if quaternion_payload else None
         grip_active = bool(payload.get("gripActive", False))
         trigger_value = float(payload.get("trigger", 0.0))
         trigger_active = trigger_value > 0.5
@@ -245,11 +408,16 @@ class IncrementalPoseMapper:
             dtype=float,
         )
 
+        pose_filter = self._pose_filters.get(hand)
+        if pose_filter is not None:
+            timestamp = time.monotonic()
+            position_vec, quaternion_array = pose_filter.filter_sample(timestamp, position_vec, quaternion_array)
+
         if not controller.grip_active:
             controller.grip_active = True
             controller.origin_position = position_vec
-            if quaternion_payload:
-                controller.origin_quaternion = _quaternion_from_payload(quaternion_payload)
+            if quaternion_array is not None:
+                controller.origin_quaternion = quaternion_array
                 controller.accumulated_quaternion = controller.origin_quaternion
             else:
                 controller.origin_quaternion = None
@@ -257,11 +425,10 @@ class IncrementalPoseMapper:
             self._cache_controller_frame(hand, reference, controller.origin_quaternion)
             return None
 
-        if quaternion_payload:
-            quaternion_now = _quaternion_from_payload(quaternion_payload)
-            controller.accumulated_quaternion = quaternion_now
+        if quaternion_array is not None:
+            controller.accumulated_quaternion = quaternion_array
             if controller.origin_quaternion is None:
-                controller.origin_quaternion = quaternion_now
+                controller.origin_quaternion = quaternion_array
                 self._cache_controller_frame(hand, reference, controller.origin_quaternion)
             elif hand not in self.controller_frames:
                 self._cache_controller_frame(hand, reference, controller.origin_quaternion)
@@ -302,7 +469,7 @@ class IncrementalPoseMapper:
             controller,
             goal_position,
             goal_rotation,
-            quaternion_payload is not None,
+            controller.accumulated_quaternion is not None,
         )
 
         return TeleopGoal(

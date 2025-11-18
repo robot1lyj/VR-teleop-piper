@@ -85,7 +85,7 @@ def _load_config_dict(path: Path) -> Dict[str, Any]:
 class PiperVRRobotConfig(RobotConfig):
     """Piper VR 遥操作录制配置。"""
 
-    teleop_config: str = "configs/piper.json"
+    teleop_config: str = "configs/piper_recording.json"
     hardware_config: str | None = None
     dry_run: bool = False
     telemetry_file: str | None = None

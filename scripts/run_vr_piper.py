@@ -15,14 +15,15 @@ import pathlib
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, TextIO, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, TextIO, Tuple
 
 import numpy as np
 import pinocchio as pin
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_PIPER_CONFIG = ROOT_DIR / "configs" / "piper.json"
+DEFAULT_PIPER_CONFIG = ROOT_DIR / "configs" / "piper_teleop.json"
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -73,7 +74,7 @@ class JointCommandFilter:
         self._initialized = True
         self._last_ts = time.monotonic()
 
-    def step(self, joints: Sequence[float]) -> np.ndarray:
+    def step(self, joints: Sequence[float], velocity_hint: Optional[Sequence[float]] = None) -> np.ndarray:
         target = np.asarray(joints, dtype=float).reshape(self.dof)
         now = time.monotonic()
         if not self._initialized:
@@ -90,7 +91,16 @@ class JointCommandFilter:
                 error = error.copy()
                 error[mask] = 0.0
 
-        acc_cmd = self._kp * error - self._kd * self._vel
+        vel_target = None
+        if velocity_hint is not None:
+            try:
+                vel_target = np.asarray(velocity_hint, dtype=float).reshape(self.dof)
+            except Exception:
+                vel_target = None
+        if vel_target is None:
+            vel_target = np.zeros(self.dof, dtype=float)
+
+        acc_cmd = self._kp * error - self._kd * (self._vel - vel_target)
         acc_clamped = np.clip(acc_cmd, -self._max_acc, self._max_acc)
 
         vel = self._vel + acc_clamped * dt
@@ -247,8 +257,10 @@ class PiperTeleopPipeline(TeleopPipeline):
         joint_error_deadband_deg: float,
         telemetry_file: Optional[str],
         telemetry_sample_measured: bool,
+        velocity_filter_window: int,
     ) -> None:
         super().__init__(session, allowed_hands, reference_translation, reference_rotation)
+        hands_list = list(self.allowed_hands)
         self.bus = bus
         self.command_interval = max(0.0, float(command_interval))
         self.gripper_open = float(gripper_open)
@@ -276,6 +288,11 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._pitch_mode_active = False
         self._pitch_base_joints: Optional[np.ndarray] = None
         self._pitch_base_angle: float = 0.0
+        self._velocity_window = max(0, int(velocity_filter_window))
+        self._velocity_histories: Dict[str, Deque[np.ndarray]] = {
+            hand: deque(maxlen=self._velocity_window or 1) for hand in hands_list
+        }
+        self._last_ik_state: Dict[str, Tuple[float, np.ndarray]] = {}
 
         dof = getattr(getattr(session.ik_solver, "reduced_robot", None), "model", None)
         if dof is not None:
@@ -448,6 +465,36 @@ class PiperTeleopPipeline(TeleopPipeline):
             return None
         return np.asarray(joints, dtype=float).reshape(-1)
 
+    def _reset_velocity_histories(self) -> None:
+        self._last_ik_state.clear()
+        for history in self._velocity_histories.values():
+            history.clear()
+
+    def _compute_velocity_hint(self, hand: str, joints: np.ndarray) -> Optional[np.ndarray]:
+        if self._velocity_window <= 0:
+            return None
+        now = time.monotonic()
+        last_entry = self._last_ik_state.get(hand)
+        velocity_hint = None
+        if last_entry is not None:
+            last_time, last_joints = last_entry
+            dt = now - last_time
+            if dt > 1e-3:
+                try:
+                    vel = (joints - last_joints) / dt
+                except Exception:
+                    vel = None
+                if vel is not None:
+                    history = self._velocity_histories.setdefault(
+                        hand, deque(maxlen=self._velocity_window or 1)
+                    )
+                    history.append(vel)
+                    if history:
+                        stacked = np.stack(history, axis=0)
+                        velocity_hint = np.mean(stacked, axis=0)
+        self._last_ik_state[hand] = (now, joints.copy())
+        return velocity_hint
+
     def prime_joint_filter(self, joints: Sequence[float]) -> None:
         try:
             self._joint_filter.prime(joints)
@@ -459,6 +506,7 @@ class PiperTeleopPipeline(TeleopPipeline):
         except Exception:
             self._joint_filter.reset()
         self._telemetry.reset_pending()
+        self._reset_velocity_histories()
 
     def shutdown(self) -> None:
         self._stop_event.set()
@@ -471,6 +519,7 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._last_filtered_joints = None
             self._last_gripper_target = None
         self._telemetry.reset_pending()
+        self._reset_velocity_histories()
         self._telemetry.close()
 
     def reset(self) -> None:  # type: ignore[override]
@@ -481,6 +530,7 @@ class PiperTeleopPipeline(TeleopPipeline):
             self._last_filtered_joints = None
             self._last_gripper_target = None
         self._telemetry.reset_pending()
+        self._reset_velocity_histories()
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
         results = self.session.handle_vr_payload(payload)
@@ -517,7 +567,8 @@ class PiperTeleopPipeline(TeleopPipeline):
             gripper_target = self._get_gripper_target(item.gripper_closed)
             summary["gripper_target"] = gripper_target
 
-            filtered = self._joint_filter.step(joints)
+            velocity_hint = self._compute_velocity_hint(item.hand, joints)
+            filtered = self._joint_filter.step(joints, velocity_hint)
             summary["command_joints_rad"] = filtered.tolist()
             summary["command_joints_deg"] = [math.degrees(val) for val in filtered]
             with self._state_lock:
@@ -730,6 +781,12 @@ def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.A
         help="关节误差死区(度)，误差低于该值时视为零",
     )
     parser.add_argument(
+        "--velocity-filter-window",
+        type=int,
+        default=5,
+        help="关节速度前馈的滑动窗口（帧数），0 表示禁用",
+    )
+    parser.add_argument(
         "--telemetry-file",
         default="",
         help="Telemetry JSONL 输出文件路径，留空表示关闭",
@@ -823,6 +880,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         joint_error_deadband_deg=args.joint_error_deadband_deg,
         telemetry_file=args.telemetry_file or None,
         telemetry_sample_measured=args.telemetry_sample_measured,
+        velocity_filter_window=args.velocity_filter_window,
     )
 
     if bus is not None and not args.dry_run:

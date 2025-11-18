@@ -26,7 +26,7 @@
     --record-time-s 0.2
   ```
 - VR WebRTC 服务：`vr_runtime/controller_pipeline.py` 能正常接受手柄数据；遥操作时握持键、扳机键都应有响应。
-- 配置文件：`configs/piper_side15.json` 已预留相机字段，可按实际设备修改：
+- 配置文件：`configs/piper_recording.json` 已预留相机字段，可按实际设备修改：
   ```json
   "cameras": {
     "front_rgb": {
@@ -38,6 +38,7 @@
     }
   }
   ```
+  同一份配置还包含 `pose_filter_*`（VR 位姿历史滤波）与 `velocity_filter_window`（关节速度滑窗）等遥操作参数，默认值较 `piper_teleop` 更平滑，必要时可根据采集任务调整；关节限速/限加继续通过 `joint_speed_limits_deg`、`joint_acc_limits_deg` 控制，确保机械臂始终在安全范围内运行。
 
 ---
 
@@ -46,8 +47,8 @@
    ```bash
    python lerobot/scripts/control_robot.py \
      --robot.type=piper_vr \
-     --robot.teleop_config=configs/piper_side15.json \
-     --robot.hardware_config=configs/piper_side15.json \
+     --robot.teleop_config=configs/piper_recording.json \
+     --robot.hardware_config=configs/piper_recording.json \
      --control.type=record \
      --control.repo_id=local/piper_vr_demo \
      --control.single_task="test" \
@@ -57,7 +58,7 @@
    ```
    - 根目录默认 `/home/lyj/data`，无需额外指定。
    - `push_to_hub` 已关闭，所有数据仅保存在本地。
-2. 连接完成后，机械臂会立即执行 `apply_calibration()`，回到 `configs/piper_side15.json` 中的 `init_joint_position`。如需跳过，可在命令行追加 `--robot.skip_home=true`。
+2. 连接完成后，机械臂会立即执行 `apply_calibration()`，回到 `configs/piper_recording.json` 中的 `init_joint_position`。如需跳过，可在命令行追加 `--robot.skip_home=true`。
 3. 程序接着进入 warmup（默认 10 秒），此时你可以用 VR 手柄微调确认对齐。
 4. **按住 VR 手柄的侧握键（grip）即可开始录制**。系统会在检测到握持后才启动本轮计时；从这一帧起，`observation.state` 和 `action` 以 30 Hz 写入数据。
 5. **松开握持键，当前 Episode 立即结束并保存**。系统会调用 `apply_calibration()` 让 Piper 回到初始位姿，并在终端提示“请复位”。等待回位完成后，再次握持即可继续录制下一条数据。
@@ -78,7 +79,7 @@
 ---
 
 ## 4. 相机与 WebRTC 配置
-- 最推荐的方式是在 `configs/piper_side15.json` 内修改 `"cameras"`，包括类型、序列号、分辨率等。
+- 最推荐的方式是在 `configs/piper_recording.json` 内修改 `"cameras"`，包括类型、序列号、分辨率等。
 - 也可以在命令行临时覆盖：`--robot.cameras='{"front_rgb": {"type": "intelrealsense", ...}}'`。
 - 需要重定向 WebRTC 服务时，可以传 `--robot.host / --robot.port / --robot.channel`。
 - 若暂时不采图像，将 `"cameras"` 字段删掉即可。

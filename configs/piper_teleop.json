@@ -35,20 +35,16 @@
   "effort_samples": 0,
   "effort_interval": 0.02,
   "effort_mode": "mean",
+  "pose_filter_window_sec": 0.8,
+  "pose_filter_degree": 2,
+  "pose_filter_min_samples": 15,
+  "pose_filter_lookahead_sec": 0.02,
+  "velocity_filter_window": 5,
   "joint_speed_limits_deg": [180.0, 195.0, 180.0, 225.0, 225.0, 225.0],
   "joint_acc_limits_deg": [300, 300.0, 300.0, 350.0, 350.0, 350.0],
   "joint_error_deadband_deg": 0.12,
   "can_name": "can_right",
-  "init_joint_position": [-25, 120.0, -100.0, -80.0, 30, -50,0],
-  "safe_disable_position":[-25, 120.0, -100.0, -80.0, 30, -50,0],
-  "joint_factor": 57296.0,
-  "cameras": {
-    "front_rgb": {
-      "type": "opencv",
-      "camera_index": 0,
-      "fps": 30,
-      "width": 640,
-      "height": 480
-    }
-  }
+  "init_joint_position": [-25, 120.0, -100.0, -80.0, 30, -50, 0],
+  "safe_disable_position": [-25, 120.0, -100.0, -80.0, 30, -50, 0],
+  "joint_factor": 57296.0
 }

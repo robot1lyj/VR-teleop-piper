@@ -399,6 +399,30 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         help="逐关节信赖域限制，支持标量或长度为关节数的列表，单位为弧度",
     )
     parser.add_argument(
+        "--pose-filter-window-sec",
+        type=float,
+        default=0.8,
+        help="VR 位姿历史滤波窗口长度（秒），<=0 表示关闭",
+    )
+    parser.add_argument(
+        "--pose-filter-degree",
+        type=int,
+        default=2,
+        help="Savitzky-Golay 拟合多项式阶数（至少 1）",
+    )
+    parser.add_argument(
+        "--pose-filter-min-samples",
+        type=int,
+        default=15,
+        help="历史滤波的最少样本数，必须大于阶数",
+    )
+    parser.add_argument(
+        "--pose-filter-lookahead-sec",
+        type=float,
+        default=0.02,
+        help="滤波后的前视预测时长（秒），可抵消窗口延迟",
+    )
+    parser.add_argument(
         "--joint-constraints",
         help="额外的关节硬约束/步长设置，可提供 JSON 字符串或在配置文件中直接写字典",
     )
@@ -500,6 +524,10 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         scale=args.scale,
         allowed_hands=hands,
         rotation_vr_to_base=mapper_rotation,
+        pose_filter_window_sec=args.pose_filter_window_sec,
+        pose_filter_degree=args.pose_filter_degree,
+        pose_filter_min_samples=args.pose_filter_min_samples,
+        pose_filter_lookahead_sec=args.pose_filter_lookahead_sec,
     )
     session = ArmTeleopSession(ik_solver=ik, mapper=mapper, check_collision=not args.no_collision)
 

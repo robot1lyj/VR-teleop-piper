@@ -1,6 +1,6 @@
 # 真实机器人适配教程
 
-本指南基于仓库默认的 VR 手柄 → IK 遥操作“基线”实现，逐步说明如何将管线对接到真实机械臂。本教程假定你已经能在本地成功运行 `scripts/run_vr_meshcat.py` 并确认 Meshcat 中的模型能随手柄运动；接下来我们将把同样的轨迹送到实体机器人。快速接入可直接使用 `scripts/run_vr_piper.py`（默认读取 `configs/piper.json`，内含 VR + Piper 硬件的统一参数），该脚本已将 VR 管线与 Piper SDK 串联，可按需参考下文细节继续自定义。
+本指南基于仓库默认的 VR 手柄 → IK 遥操作“基线”实现，逐步说明如何将管线对接到真实机械臂。本教程假定你已经能在本地成功运行 `scripts/run_vr_meshcat.py` 并确认 Meshcat 中的模型能随手柄运动；接下来我们将把同样的轨迹送到实体机器人。快速接入可直接使用 `scripts/run_vr_piper.py`（默认读取 `configs/piper_teleop.json`，内含 VR + Piper 硬件的统一参数），该脚本已将 VR 管线与 Piper SDK 串联，可按需参考下文细节继续自定义。
 
 ## 1. 整体数据链路回顾
 
@@ -26,6 +26,8 @@ VR 头显/浏览器 ── WebRTC DataChannel ──▶ vr_runtime/controller_pi
 - `robot/ik/meshcat_solver.py`：在基类基础上附加 Meshcat 可视化与手爪开闭的显示能力（真实机器人时可继续复用读取关节结果）。
 
 > **提示**：对接真实机器人时，Meshcat 仍是宝贵的可视化验证工具。建议在推送实体指令前，优先确保 Meshcat 显示的姿态与期待一致。
+
+> **滤波策略**：自 `configs/piper_teleop.json` 起，`IncrementalPoseMapper` 默认开启 `pose_filter_*`（时间窗多项式拟合）来平滑 VR 位姿，同时 `run_vr_piper.py` 中的 `velocity_filter_window` 会把最近几帧关节速度做滑动平均并作为 `JointCommandFilter` 的前馈项。若要调整滤波强度，可在命令行传 `--pose-filter-window-sec / --pose-filter-degree / --velocity-filter-window` 或直接修改配置，速度/加速度上限仍由 `joint_speed_limits_deg`、`joint_acc_limits_deg` 控制。
 
 ## 2. 准备工作
 
@@ -121,7 +123,7 @@ def handle_results(results):
 关键要点：
 
 - **初始参考位姿**：将真实机器人当前末端姿态写入 `session.set_reference_pose`，使增量映射以实体的“零点”作为基准。可以在上电后先读取一次关节角，利用 Pinocchio 计算末端位姿。
-- **单位统一**：`scripts/run_vr_piper.py` 与 `PiperMotorsBus` 以弧度（rad）接收关节目标，在写入前自动转换成控制器要求的 0.001°。配置文件 `configs/piper.json` 中的 6 个关节角建议用角度（deg）填写，驱动加载时会统一转成弧度；`gripper_open` / `gripper_closed` 仍按 SDK 约定维持线性位移（米）。
+- **单位统一**：`scripts/run_vr_piper.py` 与 `PiperMotorsBus` 以弧度（rad）接收关节目标，在写入前自动转换成控制器要求的 0.001°。配置文件 `configs/piper_teleop.json` 中的 6 个关节角建议用角度（deg）填写，驱动加载时会统一转成弧度；`gripper_open` / `gripper_closed` 仍按 SDK 约定维持线性位移（米）。
 - **平滑/信赖域**：真实机械臂对突变指令更敏感，建议在 `configs/run_vr_meshcat.json` 或脚本中开启：
   - `smooth_weight`（默认 0.05）+ `joint_smooth_weights`，抑制帧间大幅摆动。
   - `trust_region`，限制每帧关节步长，例如 `0.1`（弧度）或 `[0.1, 0.1, ...]` 列表。

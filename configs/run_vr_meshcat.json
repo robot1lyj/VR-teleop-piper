@@ -20,6 +20,10 @@
   "joint_smooth_weights": [8.0, 1.0, 1.0, 8.0, 1.0, 1.0],
   "swivel_range_deg": 30,
   "trust_region": [0.15, 0.15, 0.15, 0.08, 0.15, 0.20],
+  "pose_filter_window_sec": 0.8,
+  "pose_filter_degree": 2,
+  "pose_filter_min_samples": 15,
+  "pose_filter_lookahead_sec": 0.02,
   "joint_constraints": {
     "step_limits_deg": {
       "joint4": 5.0

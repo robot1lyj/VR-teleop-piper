@@ -98,7 +98,7 @@
 - Piper 实机运行时可通过 `--telemetry-file` 记录 IK 输出、滤波后命令与实测关节角，例如：
   ```bash
   python scripts/run_vr_piper.py \
-    --config configs/piper_side15.json \
+    --config configs/piper_teleop.json \
     --telemetry-file output/telemetry.jsonl \
     --telemetry-sample-measured
   ```
@@ -281,7 +281,7 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
   - `write(target_joint: list)`：发送 6 轴 + 夹爪目标（弧度 / 线性开度），内部自动转换成 0.001° 并限制 4 号关节与夹爪安全范围。
   - `read()`：读取当前关节（弧度）与夹爪状态。
   - `safe_disconnect()`：在下电前回到 `safe_disable_position`。
-- 使用前请在 `configs/piper.json` 中将 `can_name`、`init_joint_position` 等参数改成现场的实际配置；配置文件中的 6 个关节角以角度（deg）填写，加载后会自动转换为弧度并在发送前转成 Piper 控制器要求的 0.001°。
+- 使用前请在 `configs/piper_teleop.json` 中将 `can_name`、`init_joint_position` 等参数改成现场的实际配置；配置文件中的 6 个关节角以角度（deg）填写，加载后会自动转换为弧度并在发送前转成 Piper 控制器要求的 0.001°。
   `gripper_open` / `gripper_closed` 仍沿用 SDK 默认的线性位移单位（米），如需改用角度可在驱动层统一变换。
   建议在业务逻辑中包装 try/finally，确保异常时调用 `safe_disconnect()` 与 `connect(False)`。
 
@@ -296,7 +296,7 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
 
 - 新增脚本 `scripts/run_vr_piper.py` 已将 Meshcat 遥操作链路直接对接 Piper 实机：
   ```bash
-  # 正装默认参数 + 实机（默认读取 configs/piper.json）
+  # 正装默认参数 + 实机（默认读取 configs/piper_teleop.json）
   python scripts/run_vr_piper.py
 
   # 仅观察指令，不下发硬件
@@ -306,6 +306,7 @@ python scripts/preview_mount_pose.py --mount-rpy-deg 0,30,0 --mount-offset 0,0,0
   python scripts/run_vr_piper.py --config configs/run_vr_meshcat_side30.json
   ```
   该脚本会复用 `run_vr_meshcat.py` 的 IK/映射设置，按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，并在 DataChannel 回调里将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open/--effort-samples` 等参数即可调整指令频率、手爪目标和扭矩采样策略；未显式指定 `--piper-config` 时会默认复用 `--config` 所指向的同一份 JSON。
+- 遥操作链路默认启用了两段滤波：`pose_filter_*` 参数（窗口 0.8 s、二阶拟合）在 `IncrementalPoseMapper` 中对 VR 位姿做时间窗平滑+前视预测，`velocity_filter_window`（默认 5 帧）则用于在关节空间平均速度并作为 `JointCommandFilter` 的前馈，进一步抑制加速度冲击。需要更灵敏或更平滑时，可在命令行传 `--pose-filter-window-sec / --velocity-filter-window` 或直接修改 `configs/piper_teleop.json` / `configs/piper_recording.json`，同时 `joint_speed_limits_deg` / `joint_acc_limits_deg` 仍由配置控制，确保机械臂速度限制可一致管理。
 - 若需要手动对接或进一步定制，可继续参考 `ArmTeleopSession` / `IncrementalPoseMapper` 的组合：
   1. `PiperMotorsBus.connect()` 使能 → `apply_calibration()` 对齐零位。
   2. 启动 `scripts/run_vr_meshcat.py`，确认 Meshcat 中的末端姿态与实机一致。
