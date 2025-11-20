@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,7 +29,9 @@ from scripts.run_vr_meshcat import build_session as build_meshcat_session
 from scripts.run_vr_piper import (
     PiperTeleopPipeline,
     build_parser as build_piper_parser,
-    _sync_reference_with_robot,
+    build_piper_pipeline,
+    extract_piper_hand_configs,
+    sync_reference_with_robot,
 )
 from vr_runtime.webrtc_endpoint import VRWebRTCServer
 
@@ -91,6 +94,7 @@ class PiperVRRobotConfig(RobotConfig):
     telemetry_file: str | None = None
     telemetry_sample_measured: bool = False
     skip_home: bool = False
+    power_off_on_disconnect: bool = False
     host: str | None = None
     port: int | None = None
     channel: str | None = None
@@ -114,6 +118,7 @@ class PiperVRRobot(Robot):
         self._server: VRWebRTCServer | None = None
         self.pipeline: PiperTeleopPipeline | None = None
         self.bus: PiperMotorsBus | None = None
+        self.bus_map: Dict[str, PiperMotorsBus | None] = {}
         self.session = None
         self.logs: Dict[str, float] = {}
         self.is_connected = False
@@ -140,6 +145,7 @@ class PiperVRRobot(Robot):
         self._pending_recording_start: bool = False
         self._pending_recording_stop: bool = False
         self._hands: tuple[str, ...] = ()
+        self._primary_hand: str | None = None
 
     # ---------------------------------------------------------------------
     # Robot 接口
@@ -154,6 +160,7 @@ class PiperVRRobot(Robot):
         parser = build_piper_parser()
         teleop_overrides = _load_config_dict(teleop_path)
         camera_overrides = teleop_overrides.get("cameras")
+        hw_overrides, hand_overrides = extract_piper_hand_configs(teleop_overrides)
         known_flags = {action.dest for action in parser._actions}
         overrides = {key: value for key, value in teleop_overrides.items() if key in known_flags}
         parser.set_defaults(**overrides)
@@ -175,19 +182,27 @@ class PiperVRRobot(Robot):
 
         self.session, meshcat_pipeline = build_meshcat_session(args)
 
+        self.bus_map = {}
+        target_hands = list(meshcat_pipeline.allowed_hands) if meshcat_pipeline.allowed_hands else ["piper"]
         if not self.config.dry_run:
-            self.bus = PiperMotorsBus(hardware_path)
-            LOGGER.info(f"初始化 Piper 机械臂，总线配置: {hardware_path}")
-            if not self.bus.connect(True):
-                raise RuntimeError("Piper 机械臂使能失败，请检查硬件连接与急停状态")
-            if not self.config.skip_home:
-                try:
-                    LOGGER.info("连接完成：移动至初始姿态（apply_calibration）")
-                    self.bus.apply_calibration()
-                except Exception as exc:  # pylint: disable=broad-except
-                    LOGGER.warning("初始回零失败: %s", exc)
+            for hand in target_hands:
+                overrides = hw_overrides.get(hand)
+                bus = PiperMotorsBus(hardware_path, overrides)
+                LOGGER.info("[%s] 初始化 Piper 机械臂，总线配置: %s", hand, hardware_path)
+                if not bus.connect(True):
+                    raise RuntimeError(f"[{hand}] Piper 机械臂使能失败，请检查硬件连接与急停状态")
+                if not self.config.skip_home:
+                    try:
+                        LOGGER.info("[%s] 连接完成：移动至初始姿态（apply_calibration）", hand)
+                        bus.apply_calibration()
+                    except Exception as exc:  # pylint: disable=broad-except
+                        LOGGER.warning("[%s] 初始回零失败: %s", hand, exc)
+                self.bus_map[hand] = bus
         else:
-            self.bus = None
+            self.bus_map = {hand: None for hand in target_hands}
+
+        self._primary_hand = target_hands[0] if target_hands else None
+        self.bus = self.bus_map.get(self._primary_hand) if self._primary_hand else None
 
         if not self.config.cameras and camera_overrides:
             self.config.cameras = {
@@ -207,24 +222,12 @@ class PiperVRRobot(Robot):
             }
             LOGGER.info(f"加载相机配置：{camera_summary}")
 
-        self.pipeline = PiperTeleopPipeline(
+        self.pipeline = build_piper_pipeline(
+            args=args,
             session=self.session,
-            allowed_hands=meshcat_pipeline.allowed_hands,
-            reference_translation=meshcat_pipeline.reference_translation,
-            reference_rotation=meshcat_pipeline.reference_rotation,
-            bus=self.bus,
-            command_interval=args.command_interval,
-            gripper_open=args.gripper_open,
-            gripper_closed=args.gripper_closed,
-            dry_run=self.config.dry_run,
-            effort_samples=args.effort_samples,
-            effort_interval=args.effort_interval,
-            effort_mode=args.effort_mode,
-            joint_speed_limits_deg=args.joint_speed_limits_deg,
-            joint_acc_limits_deg=args.joint_acc_limits_deg,
-            joint_error_deadband_deg=args.joint_error_deadband_deg,
-            telemetry_file=args.telemetry_file or None,
-            telemetry_sample_measured=args.telemetry_sample_measured,
+            meshcat_pipeline=meshcat_pipeline,
+            bus_map=self.bus_map,
+            hand_pipeline_overrides=hand_overrides,
         )
 
         self._hands = tuple(meshcat_pipeline.allowed_hands)
@@ -252,7 +255,7 @@ class PiperVRRobot(Robot):
                 )
                 joint_info = ", ".join(f"{np.degrees(v):.2f}" for v in joints_rad)
                 LOGGER.info(f"同步实机关节到 IK，起始角度(度)：{joint_info}")
-                _sync_reference_with_robot(self.session, self.pipeline, joints_rad)
+                sync_reference_with_robot(self.session, self.pipeline, joints_rad)
             except Exception as exc:  # pylint: disable=broad-except
                 LOGGER.warning("同步实机关节失败：%s", exc)
 
@@ -282,7 +285,7 @@ class PiperVRRobot(Robot):
         self.is_connected = True
 
     def run_calibration(self):
-        if self.bus is None:
+        if not self.bus_map:
             LOGGER.debug("dry-run 模式下跳过 apply_calibration。")
             return
         try:
@@ -292,13 +295,21 @@ class PiperVRRobot(Robot):
                     self.pipeline._clear_pending_command()  # type: ignore[attr-defined]
                 except AttributeError:
                     pass
-            self.bus.apply_calibration()
-            target = np.asarray(self.bus.init_joint_position[:6], dtype=float)
-            joints_rad = self._wait_for_pose(target)
-            if self.pipeline is not None and self.session is not None:
-                _sync_reference_with_robot(self.session, self.pipeline, joints_rad)
-                joint_text = ", ".join(f"{np.degrees(v):.2f}" for v in joints_rad)
-                LOGGER.info(f"校准完成：同步 IK 参考，当前角度(度)：{joint_text}")
+            primary_bus = self.bus_map.get(self._primary_hand) or next(iter(self.bus_map.values()), None)
+            for hand, bus in self.bus_map.items():
+                if bus is None or self.config.dry_run:
+                    continue
+                try:
+                    bus.apply_calibration()
+                except Exception as exc:  # pylint: disable=broad-except
+                    LOGGER.warning("[%s] apply_calibration 失败: %s", hand, exc)
+            if primary_bus is not None and not self.config.dry_run:
+                target = np.asarray(primary_bus.init_joint_position[:6], dtype=float)
+                joints_rad = self._wait_for_pose(target)
+                if self.pipeline is not None and self.session is not None:
+                    sync_reference_with_robot(self.session, self.pipeline, joints_rad, self._primary_hand)
+                    joint_text = ", ".join(f"{np.degrees(v):.2f}" for v in joints_rad)
+                    LOGGER.info(f"校准完成：同步 IK 参考，当前角度(度)：{joint_text}")
         except Exception as exc:  # pylint: disable=broad-except
             LOGGER.warning("apply_calibration 失败: %s", exc)
 
@@ -346,7 +357,7 @@ class PiperVRRobot(Robot):
                 self.pipeline._clear_pending_command()  # type: ignore[attr-defined]
             except AttributeError:
                 pass
-            _sync_reference_with_robot(self.session, self.pipeline, joints_rad)
+            sync_reference_with_robot(self.session, self.pipeline, joints_rad)
             LOGGER.info(
                 "同步当前姿态到 IK 参考，关节角(度)：%s",
                 ", ".join(f"{np.degrees(v):.2f}" for v in joints_rad),
@@ -386,7 +397,17 @@ class PiperVRRobot(Robot):
             raise ValueError("send_action 需要至少 6 个关节目标值")
 
         if values.size == 6:
-            gripper = self.pipeline.gripper_open if self.pipeline else 0.0
+            gripper = 0.0
+            state = None
+            if self.pipeline is not None and hasattr(self.pipeline, "_get_state"):
+                target_hand = self._primary_hand or (self._hands[0] if self._hands else None)
+                if target_hand is not None:
+                    state = self.pipeline._get_state(target_hand)  # type: ignore[attr-defined]
+            if state is not None:
+                try:
+                    gripper = float(state.gripper_open)
+                except Exception:
+                    gripper = 0.0
             values = np.concatenate([values, [gripper]])
 
         try:
@@ -419,11 +440,14 @@ class PiperVRRobot(Robot):
             except Exception as exc:  # pylint: disable=broad-except
                 LOGGER.warning("关闭 Piper 管线失败: %s", exc)
 
-        if self.bus is not None and not self.config.dry_run:
-            try:
-                self.bus.connect(False)
-            except Exception:  # pylint: disable=broad-except
-                pass
+        if self.config.power_off_on_disconnect and not self.config.dry_run and self.bus_map:
+            for bus in set(self.bus_map.values()):
+                if bus is None:
+                    continue
+                try:
+                    bus.connect(False)
+                except Exception:  # pylint: disable=broad-except
+                    pass
 
         for camera in self.cameras.values():
             try:
@@ -432,6 +456,7 @@ class PiperVRRobot(Robot):
                 pass
         self.pipeline = None
         self.bus = None
+        self.bus_map = {}
         self.session = None
         self.reset_recording_state()
         self.is_connected = False
@@ -533,7 +558,12 @@ class PiperVRRobot(Robot):
                 return self._last_action.copy()
             return self._read_observation()
 
-        joints, gripper = self.pipeline.get_latest_command()
+        joints, gripper = self.pipeline.get_latest_command(self._primary_hand)
+        state = None
+        if hasattr(self.pipeline, "_get_state"):
+            target_hand = self._primary_hand or (self._hands[0] if self._hands else None)
+            if target_hand is not None:
+                state = self.pipeline._get_state(target_hand)  # type: ignore[attr-defined]
 
         if joints is None:
             if self._last_action is not None:
@@ -545,8 +575,13 @@ class PiperVRRobot(Robot):
         if gripper is None:
             if self._last_action is not None:
                 gripper = float(self._last_action[-1])
+            elif state is not None:
+                try:
+                    gripper = float(state.gripper_open)
+                except Exception:
+                    gripper = 0.0
             else:
-                gripper = float(self.pipeline.gripper_open)
+                gripper = 0.0
 
         action = np.concatenate([joints.reshape(-1), [float(gripper)]])
         return action
