@@ -45,7 +45,16 @@ class MainWindow(QtWidgets.QWidget):
         # 多相机容器
         self.preview_grid = QtWidgets.QGridLayout()
         self.preview_labels: Dict[str, QtWidgets.QLabel] = {}
-        self._init_previews(list(getattr(dataset.meta, "camera_keys", [])))
+        self.preview_captions: Dict[str, QtWidgets.QLabel] = {}
+        self.preview_cards: Dict[str, QtWidgets.QWidget] = {}
+        self.camera_keys = list(dict.fromkeys(getattr(dataset.meta, "camera_keys", [])))
+        self._init_previews(self.camera_keys)
+
+        self.status_bar = QtWidgets.QProgressBar()
+        self.status_bar.setRange(0, 0)
+        self.status_bar.setVisible(False)
+        self.status_bar.setTextVisible(True)
+        self.status_bar.setFormat("保存/编码中…")
 
         self.start_toggle = QtWidgets.QPushButton("开始录制")
         self.start_toggle.setObjectName("primaryButton")
@@ -64,6 +73,10 @@ class MainWindow(QtWidgets.QWidget):
         header.addWidget(self.frame_label)
         header.setContentsMargins(0, 0, 0, 4)
 
+        header2 = QtWidgets.QHBoxLayout()
+        header2.addWidget(self.status_bar)
+        header2.addStretch()
+
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addWidget(self.start_toggle)
         btn_row.addWidget(self.next_btn)
@@ -75,13 +88,16 @@ class MainWindow(QtWidgets.QWidget):
         glass = QtWidgets.QFrame()
         glass.setObjectName("glassCard")
         glass_layout = QtWidgets.QVBoxLayout(glass)
+        glass_layout.setContentsMargins(6, 4, 6, 6)
         glass_layout.addLayout(header)
+        glass_layout.addLayout(header2)
         glass_layout.addLayout(self.preview_grid)
         glass_layout.addLayout(btn_row)
-        glass_layout.setSpacing(6)
+        glass_layout.setSpacing(8)
         glass_layout.setStretch(0, 0)
-        glass_layout.setStretch(1, 12)
+        glass_layout.setStretch(1, 0)
         glass_layout.setStretch(2, 1)
+        glass_layout.setStretch(3, 0)
 
         info_card = QtWidgets.QFrame()
         info_card.setObjectName("glassCard")
@@ -101,6 +117,14 @@ class MainWindow(QtWidgets.QWidget):
         info_grid.addWidget(QtWidgets.QLabel(str(worker.min_frames)), 3, 1)
         info_grid.addWidget(QtWidgets.QLabel("preview_fps"), 4, 0)
         info_grid.addWidget(QtWidgets.QLabel(str(worker.preview_fps)), 4, 1)
+        info_grid.addWidget(QtWidgets.QLabel("loop_fps"), 5, 0)
+        self.loop_fps_label = QtWidgets.QLabel("-")
+        self.loop_fps_label.setObjectName("metric")
+        info_grid.addWidget(self.loop_fps_label, 5, 1)
+        info_grid.addWidget(QtWidgets.QLabel("cam_fps"), 6, 0)
+        self.cam_fps_label = QtWidgets.QLabel("-")
+        self.cam_fps_label.setObjectName("metric")
+        info_grid.addWidget(self.cam_fps_label, 6, 1)
         info_layout.addLayout(info_grid)
 
         self.hint = QtWidgets.QLabel("提示：保存后等待视频压缩完成，再复位场景并开始下一集。")
@@ -132,6 +156,8 @@ class MainWindow(QtWidgets.QWidget):
         self.worker.error.connect(self._on_error)
         self.worker.counters.connect(self._on_counters)
         self.worker.log_event.connect(self._append_log)
+        self.worker.saving_state.connect(self._on_saving_state)
+        self.worker.metrics_update.connect(self._on_metrics)
 
     # --- 回调 ---
     def _toggle_start(self, checked: bool):
@@ -164,6 +190,26 @@ class MainWindow(QtWidgets.QWidget):
         QtWidgets.QMessageBox.critical(self, "错误", text)
         self._append_log(f"错误：{text}")
         self._quit()
+
+    def _on_saving_state(self, saving: bool):
+        self.status_bar.setVisible(saving)
+        self.start_toggle.setEnabled(not saving)
+        self.next_btn.setEnabled(not saving)
+        if saving:
+            self.status_bar.setRange(0, 0)
+        else:
+            self.status_bar.setRange(0, 1)
+            self.status_bar.setValue(1)
+
+    def _on_metrics(self, metrics: dict):
+        loop_fps = metrics.get("loop_fps", 0.0)
+        cam_fps = metrics.get("cam_fps", {})
+        self.loop_fps_label.setText(f"{loop_fps:.1f}")
+        if cam_fps:
+            parts = [f"{k.split('.')[-1]}:{v:.1f}" for k, v in cam_fps.items()]
+            self.cam_fps_label.setText(", ".join(parts))
+        else:
+            self.cam_fps_label.setText("-")
 
     def _update_frame(self, key: str, img: np.ndarray):
         h, w = img.shape[:2]
@@ -268,6 +314,10 @@ class MainWindow(QtWidgets.QWidget):
                 border-radius: 10px;
                 color: #111111;
             }}
+            #previewCaption {{
+                font-size: 12px;
+                color: #4b5563;
+            }}
             """
         )
 
@@ -277,33 +327,110 @@ class MainWindow(QtWidgets.QWidget):
         self.log_box.verticalScrollBar().setValue(self.log_box.verticalScrollBar().maximum())
 
     def _init_previews(self, keys: list[str]) -> None:
-        if not keys:
-            keys = ["待接入相机"]
-        self.preview_grid.setSpacing(6)
-        cols = 2
-        for idx, key in enumerate(keys):
-            row = idx // cols
-            col = idx % cols
-            label = self._make_preview_label(key)
-            self.preview_grid.addWidget(label, row, col)
-            self.preview_labels[key] = label
+        self.preview_grid.setSpacing(8)
+        self.preview_grid.setContentsMargins(0, 0, 0, 0)
+        self.preview_grid.setAlignment(QtCore.Qt.AlignTop)
+        self._layout_previews(keys)
 
-    def _make_preview_label(self, key: str) -> QtWidgets.QLabel:
+    def _camera_display_name(self, key: str) -> str:
+        name = key.replace("observation.images.", "")
+        for suffix in ("_rgb", "_depth"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        return name
+
+    def _ordered_camera_keys(self, keys: list[str]) -> list[str]:
+        preferred_names = ["left_wrist", "right_wrist", "laptop"]
+        ordered: list[str] = []
+        for pref in preferred_names:
+            ordered.extend([k for k in keys if self._camera_display_name(k) == pref and k not in ordered])
+        ordered.extend([k for k in keys if k not in ordered])
+        return ordered
+
+    def _make_preview_widget(self, key: str) -> tuple[QtWidgets.QWidget, QtWidgets.QLabel, QtWidgets.QLabel]:
+        container = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(container)
+        vbox.setContentsMargins(2, 0, 2, 0)
+        vbox.setSpacing(4)
+
         lbl = QtWidgets.QLabel()
         lbl.setObjectName("preview")
-        lbl.setFixedSize(460, 300)
+        lbl.setMinimumSize(360, 220)
+        lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         lbl.setAlignment(QtCore.Qt.AlignCenter)
-        lbl.setText(key)
-        return lbl
+        lbl.setText(self._camera_display_name(key))
+
+        caption = QtWidgets.QLabel(self._camera_display_name(key))
+        caption.setObjectName("previewCaption")
+        caption.setAlignment(QtCore.Qt.AlignCenter)
+
+        vbox.addWidget(lbl)
+        vbox.addWidget(caption)
+        return container, lbl, caption
+
+    def _get_or_create_preview_widget(
+        self, key: str
+    ) -> tuple[QtWidgets.QWidget, QtWidgets.QLabel, QtWidgets.QLabel]:
+        if key in self.preview_labels:
+            return self.preview_cards[key], self.preview_labels[key], self.preview_captions[key]
+        container, lbl, caption = self._make_preview_widget(key)
+        self.preview_cards[key] = container
+        self.preview_labels[key] = lbl
+        self.preview_captions[key] = caption
+        return container, lbl, caption
+
+    def _pop_key_by_name(self, keys: list[str], used: set[str], display_name: str) -> str | None:
+        for key in keys:
+            if key in used:
+                continue
+            if self._camera_display_name(key) == display_name:
+                return key
+        return None
+
+    def _layout_previews(self, keys: list[str]) -> None:
+        while self.preview_grid.count():
+            item = self.preview_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+        ordered = self._ordered_camera_keys(keys)
+        used: set[str] = set()
+
+        def place(key: str, row: int, col: int, colspan: int = 1):
+            container, label, caption = self._get_or_create_preview_widget(key)
+            label.setText(self._camera_display_name(key))
+            caption.setText(self._camera_display_name(key))
+            label.setToolTip(key)
+            self.preview_grid.addWidget(container, row, col, 1, colspan)
+            used.add(key)
+
+        has_wrist = False
+        left_key = self._pop_key_by_name(ordered, used, "left_wrist")
+        if left_key:
+            place(left_key, 0, 0)
+            has_wrist = True
+        right_key = self._pop_key_by_name(ordered, used, "right_wrist")
+        if right_key:
+            place(right_key, 0, 1)
+            has_wrist = True
+        row_cursor = 1 if has_wrist else 0
+
+        laptop_key = self._pop_key_by_name(ordered, used, "laptop")
+        if laptop_key:
+            place(laptop_key, row_cursor, 0, colspan=2)
+            row_cursor += 1
+
+        remaining = [k for k in ordered if k not in used]
+        for idx, key in enumerate(remaining):
+            row = row_cursor + idx // 2
+            col = idx % 2
+            place(key, row, col)
 
     def _ensure_preview_label(self, key: str) -> QtWidgets.QLabel:
         if key in self.preview_labels:
             return self.preview_labels[key]
-        label = self._make_preview_label(key)
-        count = len(self.preview_labels)
-        cols = 2
-        row = count // cols
-        col = count % cols
-        self.preview_grid.addWidget(label, row, col)
-        self.preview_labels[key] = label
-        return label
+        if key not in self.camera_keys:
+            self.camera_keys.append(key)
+        self._layout_previews(self.camera_keys)
+        return self.preview_labels[key]

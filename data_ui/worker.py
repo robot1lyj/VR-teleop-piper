@@ -23,6 +23,8 @@ class RecorderWorker(QtCore.QThread):
     error = QtCore.pyqtSignal(str)
     counters = QtCore.pyqtSignal(int, int)
     log_event = QtCore.pyqtSignal(str)
+    saving_state = QtCore.pyqtSignal(bool)
+    metrics_update = QtCore.pyqtSignal(dict)
 
     def __init__(
         self,
@@ -54,6 +56,9 @@ class RecorderWorker(QtCore.QThread):
         self._lock = threading.Lock()
         self._saving = False
         self._save_thread: Optional[threading.Thread] = None
+        self._loop_dt_ema = 0.0
+        self._cam_fps: dict[str, float] = {}
+        self._last_metrics_emit = 0.0
 
     def stop(self):
         self._stop.set()
@@ -95,6 +100,10 @@ class RecorderWorker(QtCore.QThread):
             last_t = self._preview_ts.get(key, 0.0)
             if now - last_t < 1 / max(1, self.preview_fps):
                 continue
+            if last_t > 0:
+                fps = 1.0 / max(1e-6, now - last_t)
+                prev = self._cam_fps.get(key, fps)
+                self._cam_fps[key] = 0.8 * prev + 0.2 * fps
             np_img = image
             if hasattr(image, "numpy"):
                 np_img = image.numpy()
@@ -131,11 +140,13 @@ class RecorderWorker(QtCore.QThread):
                 self.log_event.emit(f"保存失败：{exc}")
             finally:
                 self._saving = False
+                self.saving_state.emit(False)
                 self.dataset.episode_buffer = self.dataset.create_episode_buffer()
 
         self._saving = True
         t0 = time.perf_counter()
         self.log_event.emit("开始后台保存/编码，请等待完成再开始下一集")
+        self.saving_state.emit(True)
         self._save_thread = threading.Thread(target=_job, name="episode-save", daemon=True)
         self._save_thread.start()
 
@@ -204,6 +215,18 @@ class RecorderWorker(QtCore.QThread):
                 self._emit_preview(observation)
 
                 dt = time.perf_counter() - loop_start
+                # 指标更新
+                if self._loop_dt_ema == 0.0:
+                    self._loop_dt_ema = dt
+                else:
+                    self._loop_dt_ema = 0.9 * self._loop_dt_ema + 0.1 * dt
+                now_perc = time.perf_counter()
+                if now_perc - self._last_metrics_emit > 1.0:
+                    loop_fps = 1.0 / self._loop_dt_ema if self._loop_dt_ema > 0 else 0.0
+                    metrics = {"loop_fps": loop_fps, "cam_fps": dict(self._cam_fps)}
+                    self.metrics_update.emit(metrics)
+                    self._last_metrics_emit = now_perc
+
                 busy_wait(1 / self.fps - dt)
         except Exception as exc:  # pylint: disable=broad-except
             self.error.emit(str(exc))

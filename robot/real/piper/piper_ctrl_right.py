@@ -13,7 +13,7 @@ if __name__ == "__main__":
         time.sleep(0.01)
     factor = 1000 #1000*180/3.1415926
     # position = [ 0 , 0, 0,   0 ,0, 0,60]
-    position = [-25, 120.0, -100.0, -80.0, 30, -50,0]
+    # position = [-25, 120.0, -100.0, -80.0, 30, -50,0]
     # position = [-25, 120.0, -100.0, -50, 25, -50,0]
     position = [-80, 170.0, -150.0, -80, 0, 0,0]
     
@@ -25,7 +25,7 @@ if __name__ == "__main__":
     joint_5 = round(position[5]*factor)
     joint_6 = round(position[6]*1000)
 
-    piper1.ModeCtrl(0x01, 0x01, 10, 0x00)
+    piper1.ModeCtrl(0x01, 0x01, 10, 0xAD)
     piper1.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
     piper1.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
     pass
