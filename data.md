@@ -148,5 +148,7 @@
 ## 8. 桌面多视角采集 UI（Qt）
 - 入口：`python scripts/qt_recorder.py --repo-id local/piper_vr_demo --single-task "test" --teleop-config configs/piper_recording.json --hardware-config configs/piper_recording.json --fps 30 --video --resume`
 - 功能：多路相机预览（键名与数据集一致，如 `observation.images.front_rgb`）、握持触发录制、开始/放弃/下一集按钮、事件日志。
+- 布局改进：预览区域靠上，减少顶部空白；`left_wrist` 与 `right_wrist` 优先占据第一行，`laptop` 居中下一行，其余相机按序排布，接入多少就显示多少。
+- 视角标注：每个预览下方显示当前相机名称，来自配置/数据集中的相机键名，便于确认左右手和笔记本视角。
 - 保存/视频编码后台线程处理：录制结束后会提示“保存中…请等待完成再复位”，避免阻塞 UI；等提示完成再开始下一集。
 - 若目录仅有 `meta/info.json` 且缺失 `tasks.jsonl`，会自动重建数据集而不会访问 HuggingFace。

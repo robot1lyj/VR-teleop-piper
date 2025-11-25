@@ -83,7 +83,8 @@
 
 ## 桌面多视角采集 UI（Qt）
 - 入口：`python scripts/qt_recorder.py --repo-id local/piper_vr_demo --teleop-config configs/piper_recording.json --hardware-config configs/piper_recording.json --fps 30 --video --resume`
-- 多路相机同时预览，名称与数据集键一致（`observation.images.<name>`）；握持触发录制，按钮控制开始/放弃/下一集，右侧日志提示保存/压缩耗时。
+- 多路相机同时预览，名称与数据集键一致（`observation.images.<name>`），按 `left_wrist`/`right_wrist`/`laptop` 优先占位，其余相机顺序排布；每个预览下方都会显示视角名称，接入几个相机就展示几个。
+- 预览布局靠上，减少顶部留白；握持触发录制，按钮控制开始/放弃/下一集，右侧日志提示保存/压缩耗时。
 - Episode 保存与视频编码在后台线程执行，录制结束时会提示“保存中…”，待提示完成再复位场景开始下一集，避免阻塞采集。
 
 ## 调试建议（局域网）
