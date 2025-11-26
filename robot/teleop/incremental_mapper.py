@@ -60,6 +60,11 @@ class PoseHistoryFilter:
         filtered_rot = self._smooth_orientation()
         return filtered_pos if filtered_pos is not None else pos, filtered_rot if filtered_rot is not None else quat
 
+    def reset(self) -> None:
+        """清空历史窗口，握持重新开始时避免用旧样本参与平滑。"""
+
+        self._samples.clear()
+
     def _trim(self, latest_ts: float) -> None:
         if not self.enabled or self.window_sec <= 0.0:
             return
@@ -397,6 +402,9 @@ class IncrementalPoseMapper:
                 controller.reset_grip()
                 self.controller_frames.pop(hand, None)
                 self._pitch_states[hand] = {"active": False}
+                pose_filter = self._pose_filters.get(hand)
+                if pose_filter is not None:
+                    pose_filter.reset()
             return None
 
         position_vec = np.array(
