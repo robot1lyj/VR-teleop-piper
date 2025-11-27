@@ -12,12 +12,7 @@
 - `BaseArmIK._sanitize_trust_region(region, size)`：把标量/列表转成长度为关节数的数组，单位弧度。
 - `BaseArmIK._sanitize_swivel_limit(limit)`：将肘部范围裁剪到 `(0, π]`；`None` 表示关闭。
 
-## robot/ik/meshcat_solver.py
-- `MeshcatArmIK.__init__(..., enable_viewer)`：在 `BaseArmIK` 的基础上带上 Meshcat 可视化；如果 Meshcat 依赖缺失会自动降级。
-- `MeshcatArmIK.set_visual_base_transform(rotation, translation)`：设置 Meshcat 中的基座姿态（旋转矩阵 + 平移向量），用于模拟不同安装方式。
-- `MeshcatArmIK.refresh_visual(q)`：手动刷新关节角到 Meshcat，常用于更新初始姿态或加载回放数据。
-
-## scripts/run_vr_meshcat.py
+## scripts/teleop_common.py
 - `build_session(args)`：解析配置后构建遥操作会话；负责把 `swivel_range_deg`→弧度，并传入 `joint_constraints`。
 - `_parse_joint_constraints_arg(value)`：支持从 JSON 字符串或配置字典读取约束；格式例如 `{"step_limits_deg":{"joint4":15}}`。
-- `_replay_trajectory_sync(session, trajectory, speed, loop_playback)`：离线回放工具，便于在 Meshcat/离线模式下验证 IK 与约束行为。
+- `TeleopPipeline.process_message(payload)`：适配 `VRWebRTCServer`，将 VR 报文送入 `ArmTeleopSession` 并返回 IK 结果摘要。

@@ -261,7 +261,7 @@ class IncrementalPoseMapper:
         self,
         scale: float = 1.0,
         allowed_hands: Optional[Iterable[str]] = None,
-        rotation_vr_to_base: np.ndarray = R_BV_DEFAULT,
+        rotation_vr_to_base: np.ndarray | Dict[str, np.ndarray] = R_BV_DEFAULT,
         pose_filter_window_sec: float = 0.0,
         pose_filter_degree: int = 2,
         pose_filter_min_samples: int = 15,
@@ -274,8 +274,23 @@ class IncrementalPoseMapper:
 
         self.scale = float(scale)
         self.allowed_hands = allowed_set
-        self.rotation_vr_to_base = np.asarray(rotation_vr_to_base, dtype=float).reshape(3, 3)
-        self.rotation_base_to_vr = self.rotation_vr_to_base.T
+        self._default_rotation = np.asarray(
+            rotation_vr_to_base if not isinstance(rotation_vr_to_base, dict) else R_BV_DEFAULT,
+            dtype=float,
+        ).reshape(3, 3)
+
+        self.rotation_vr_to_base_map: Dict[str, np.ndarray] = {}
+        if isinstance(rotation_vr_to_base, dict):
+            for hand, mat in rotation_vr_to_base.items():
+                if hand not in allowed_set:
+                    continue
+                self.rotation_vr_to_base_map[hand] = np.asarray(mat, dtype=float).reshape(3, 3)
+        if not self.rotation_vr_to_base_map:
+            for hand in allowed_set:
+                self.rotation_vr_to_base_map[hand] = self._default_rotation
+        self.rotation_base_to_vr_map: Dict[str, np.ndarray] = {
+            hand: rot.T for hand, rot in self.rotation_vr_to_base_map.items()
+        }
 
         self.controllers: Dict[str, ControllerState] = {
             "left": ControllerState("left"),
@@ -362,12 +377,13 @@ class IncrementalPoseMapper:
     ) -> None:
         """基于当前参考姿态与手柄零位四元数缓存局部映射。"""
 
+        rot_bv = self.rotation_vr_to_base_map.get(hand, self._default_rotation)
         reference_rotation = reference["rotation"].copy()
         vr_origin_matrix = np.eye(3)
         if origin_quaternion is not None:
             vr_origin_matrix = _quaternion_to_matrix(origin_quaternion)
 
-        ctrl_to_base = self.rotation_vr_to_base @ vr_origin_matrix
+        ctrl_to_base = rot_bv @ vr_origin_matrix
         ctrl_to_ee = reference_rotation.T @ ctrl_to_base
         self.controller_frames[hand] = {
             "reference_rotation": reference_rotation,
@@ -445,7 +461,9 @@ class IncrementalPoseMapper:
         if origin_position is None:
             origin_position = np.zeros(3)
         delta_vr = position_vec - origin_position
-        delta_base = self.rotation_vr_to_base @ delta_vr
+        rot_bv = self.rotation_vr_to_base_map.get(hand, self._default_rotation)
+        rot_vb = self.rotation_base_to_vr_map.get(hand, rot_bv.T)
+        delta_base = rot_bv @ delta_vr
         goal_position = reference["position"] + self.scale * delta_base
 
         goal_rotation = reference["rotation"]
@@ -469,7 +487,7 @@ class IncrementalPoseMapper:
             q_origin = _normalize_quaternion(controller.origin_quaternion)
             q_rel = _quaternion_multiply(q_now, _quaternion_conjugate(q_origin))
             rot_rel_vr = _quaternion_to_matrix(q_rel)
-            rot_rel_base = self.rotation_vr_to_base @ rot_rel_vr @ self.rotation_base_to_vr
+            rot_rel_base = rot_bv @ rot_rel_vr @ rot_vb
             goal_rotation = reference["rotation"] @ rot_rel_base
 
         goal_position, goal_rotation, pitch_active, pitch_angle = self._apply_pitch_mode(

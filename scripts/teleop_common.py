@@ -1,4 +1,4 @@
-"""运行 VR 手柄 -> Piper Meshcat 遥操作演示。"""
+"""共享的 VR 遥操作管线构建工具（无 Meshcat 依赖）。"""
 
 from __future__ import annotations
 
@@ -7,22 +7,18 @@ import asyncio
 import json
 import logging
 import pathlib
-import sys
-import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
 import numpy as np
 import pinocchio as pin
 
-ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "run_vr_meshcat.json"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 from vr_runtime.webrtc_endpoint import VRWebRTCServer
-from robot.ik import MeshcatArmIK
-from robot.teleop import ArmTeleopSession, IncrementalPoseMapper
+from robot.ik import BaseArmIK
+from robot.teleop import ArmTeleopSession, IncrementalPoseMapper, HandRegistry, TeleopConfig
 from robot.teleop.incremental_mapper import R_BV_DEFAULT
+
+ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = ROOT_DIR / "configs" / "piper_teleop.json"
 
 
 class TeleopPipeline:
@@ -34,11 +30,13 @@ class TeleopPipeline:
         allowed_hands: Iterable[str],
         reference_translation: np.ndarray,
         reference_rotation: np.ndarray,
+        per_hand_reference: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
     ) -> None:
         self.session = session
         self.allowed_hands = set(allowed_hands)
         self.reference_translation = np.asarray(reference_translation, dtype=float).reshape(3)
         self.reference_rotation = np.asarray(reference_rotation, dtype=float).reshape(3, 3)
+        self.per_hand_reference = per_hand_reference or {}
         self._apply_reference()
 
     def process_message(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -68,7 +66,11 @@ class TeleopPipeline:
 
     def _apply_reference(self) -> None:
         for hand in self.allowed_hands:
-            self.session.set_reference_pose(hand, self.reference_translation, self.reference_rotation)
+            ref = self.per_hand_reference.get(hand)
+            if ref is not None:
+                self.session.set_reference_pose(hand, ref["translation"], ref["rotation"])
+            else:
+                self.session.set_reference_pose(hand, self.reference_translation, self.reference_rotation)
 
 
 def _log_results(results: List[Any]) -> None:
@@ -106,31 +108,6 @@ def _iter_trajectory(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
                 "elapsed": float(record.get("elapsed", 0.0)),
                 "payload": payload,
             }
-
-
-def _replay_trajectory_sync(
-    session: ArmTeleopSession,
-    trajectory: List[Dict[str, Any]],
-    speed: float,
-    loop_playback: bool,
-) -> None:
-    logger = logging.getLogger(__name__)
-    logger.info("开始离线轨迹回放，共 %d 帧，速度倍率 %.2f", len(trajectory), speed)
-    speed = max(speed, 1e-6)
-    try:
-        while True:
-            start = time.perf_counter()
-            for frame in trajectory:
-                target_time = start + frame["elapsed"] / speed
-                remaining = target_time - time.perf_counter()
-                if remaining > 0:
-                    time.sleep(remaining)
-                results = session.handle_vr_payload(frame["payload"])
-                _log_results(results)
-            if not loop_playback:
-                break
-    finally:
-        logger.info("轨迹回放完成")
 
 
 def _parse_joint_weights_arg(value: Any) -> Dict[str, float] | List[float] | None:
@@ -275,27 +252,72 @@ def _rotation_from_rpy_deg(rpy_deg: np.ndarray | None) -> np.ndarray:
     raise RuntimeError("当前 Pinocchio 版本不支持 RPY 转换函数")
 
 
-def _parse_mount_offset(value: Any) -> np.ndarray | None:
-    """解析基座平移（米），允许列表/逗号分隔字符串。"""
+def _parse_hand_mount_rpy_deg(value: Any) -> Dict[str, np.ndarray]:
+    """解析 per-hand 安装 RPY（度），支持字典或 JSON 字符串。"""
 
     if value is None:
-        return None
+        return {}
 
-    if isinstance(value, (list, tuple)):
-        items = list(value)
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
-        items = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+    if isinstance(value, dict):
+        result: Dict[str, np.ndarray] = {}
+        for hand, val in value.items():
+            if hand not in {"left", "right"}:
+                continue
+            arr = np.asarray(val, dtype=float).reshape(-1)
+            if arr.size != 3:
+                raise ValueError("hand_mount_rpy_deg 每个手柄需要 3 个角度")
+            result[hand] = arr
+        return result
 
-    if len(items) != 3:
-        raise ValueError("mount_offset 需要提供 xyz 三个分量")
+    text = str(value).strip()
+    if not text:
+        return {}
 
+    # 支持 JSON 字符串或简单的 hand:angles 列表
     try:
-        return np.array([float(item) for item in items], dtype=float)
-    except ValueError as exc:
-        raise ValueError("mount_offset 必须全部为浮点数") from exc
+        maybe_json = json.loads(text)
+        if isinstance(maybe_json, dict):
+            return _parse_hand_mount_rpy_deg(maybe_json)
+    except Exception:
+        pass
+
+    parts = [item.strip() for item in text.replace(";", ",").split(",") if item.strip()]
+    if not parts:
+        return {}
+    if len(parts) % 4 != 0:
+        raise ValueError("hand_mount_rpy_deg 简写格式应为 hand,rx,ry,rz 重复出现")
+    result: Dict[str, np.ndarray] = {}
+    for idx in range(0, len(parts), 4):
+        hand = parts[idx]
+        if hand not in {"left", "right"}:
+            continue
+        try:
+            angles = [float(parts[idx + 1]), float(parts[idx + 2]), float(parts[idx + 3])]
+        except Exception as exc:
+            raise ValueError("hand_mount_rpy_deg 角度需为浮点数") from exc
+        result[hand] = np.array(angles, dtype=float)
+    return result
+
+
+def _parse_hand_joint_constraints(value: Any) -> Dict[str, Dict[str, Any]]:
+    """解析 per-hand 关节约束，支持 JSON 字符串或字典。"""
+
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        return {str(k): v for k, v in value.items() if str(k) in {"left", "right"}}
+
+    text = str(value).strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"hand_joint_constraints JSON 解析失败: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("hand_joint_constraints 需为 JSON 对象")
+    return _parse_hand_joint_constraints(parsed)
 
 
 def _parse_trust_region_arg(value: Any) -> float | List[float] | None:
@@ -365,21 +387,17 @@ def _load_config_file(path: pathlib.Path) -> Dict[str, Any]:
 
 def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     parents = [config_parent] if config_parent is not None else []
-    parser = argparse.ArgumentParser(description="VR 手柄 Meshcat 遥操作演示", parents=parents)
+    parser = argparse.ArgumentParser(description="VR 手柄遥操作会话（无 Meshcat）", parents=parents)
     parser.add_argument("--urdf", default="piper_description/urdf/piper_description.urdf", help="Piper URDF 路径")
     parser.add_argument("--host", default="0.0.0.0", help="WebSocket 信令监听地址")
     parser.add_argument("--port", type=int, default=8442, help="WebSocket 信令端口")
     parser.add_argument("--channel", default="controller", help="DataChannel 名称")
     parser.add_argument("--scale", type=float, default=1.0, help="位置增量缩放")
-    parser.add_argument("--no-meshcat", action="store_true", help="禁用 Meshcat 可视化，只做轨迹回放/IK")
     parser.add_argument("--hands", choices=["both", "left", "right"], default="right", help="参与遥操作的手柄")
     parser.add_argument("--no-stun", action="store_true", help="禁用 STUN，仅用于局域网")
     parser.add_argument("--stun", action="append", default=[], metavar="URL", help="额外 STUN 地址")
     parser.add_argument("--log-level", default="info")
     parser.add_argument("--no-collision", action="store_true", help="关闭 IK 自碰撞检测，避免模型几何缺失导致的崩溃")
-    parser.add_argument("--replay", help="指定录制的 JSONL 轨迹文件进行离线回放")
-    parser.add_argument("--replay-speed", type=float, default=1.0, help="回放速度倍率")
-    parser.add_argument("--replay-loop", action="store_true", help="循环回放轨迹")
     parser.add_argument(
         "--joint-reg-weights",
         help="逐关节正则权重，如 'joint1=6,joint4=6' 或 '6,1,1,6,1,1'；输入 none 表示使用默认值",
@@ -431,12 +449,16 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         help="机械臂基座绕 XYZ（度）的安装姿态，格式如 '0,30,0'，默认水平正装",
     )
     parser.add_argument(
+        "--hand-mount-rpy-deg",
+        help="按手柄指定安装姿态（度），支持 JSON 或 hand,rx,ry,rz 列表，如 '{\"left\":[-75,0,0],\"right\":[75,0,0]}'",
+    )
+    parser.add_argument(
         "--home-q-deg",
         help="自定义初始关节角（度），按 joint1..jointN 顺序提供，例如 '0,-45,30,0,15,0'",
     )
     parser.add_argument(
-        "--mount-offset",
-        help="机械臂基座在 Meshcat 中的平移偏置（米），格式如 '0,0,0.15'",
+        "--hand-joint-constraints",
+        help="按手柄提供关节约束（JSON 对象），键为 left/right，值与 joint_constraints 格式一致",
     )
     return parser
 
@@ -472,14 +494,19 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         raise SystemExit(f"安装姿态解析失败: {exc}")
 
     try:
+        hand_mount_rpy = _parse_hand_mount_rpy_deg(getattr(args, "hand_mount_rpy_deg", None))
+    except ValueError as exc:
+        raise SystemExit(f"按手柄安装姿态解析失败: {exc}")
+
+    try:
         home_q_deg = _parse_home_q_deg(args.home_q_deg)
     except ValueError as exc:
         raise SystemExit(f"初始关节角解析失败: {exc}")
 
     try:
-        mount_offset = _parse_mount_offset(args.mount_offset)
+        hand_joint_constraints = _parse_hand_joint_constraints(getattr(args, "hand_joint_constraints", None))
     except ValueError as exc:
-        raise SystemExit(f"安装平移解析失败: {exc}")
+        raise SystemExit(f"按手柄关节约束解析失败: {exc}")
 
     if reg_weights is None and args.joint_reg_weights is None:
         reg_weights = [5.0, 1.0, 1.0, 5.0, 1.0, 1.0]
@@ -492,95 +519,115 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         if limit_deg > 0.0:
             swivel_limit = np.deg2rad(limit_deg)
 
-    mount_rotation = _rotation_from_rpy_deg(mount_rpy_deg)
-    if mount_rpy_deg is not None:
-        logging.getLogger(__name__).info(
-            f"应用基座安装 RPY(度)：[{mount_rpy_deg[0]:.2f}, {mount_rpy_deg[1]:.2f}, {mount_rpy_deg[2]:.2f}]"
-        )
-    if mount_offset is not None:
-        mount_offset = np.asarray(mount_offset, dtype=float).reshape(3)
-        logging.getLogger(__name__).info(
-            f"应用基座平移 (m)：[{mount_offset[0]:.3f}, {mount_offset[1]:.3f}, {mount_offset[2]:.3f}]"
-        )
-    else:
-        mount_offset = np.zeros(3)
-
-    mapper_rotation = mount_rotation.T @ R_BV_DEFAULT
-
-    ik = MeshcatArmIK(
-        urdf_path=args.urdf,
-        enable_viewer=not args.no_meshcat,
-        smooth_weight=0.05,
-        position_weight=40.0,
-        orientation_weight=20.0,
+    config = TeleopConfig.from_args(
+        urdf=args.urdf,
+        hands=hands,
+        scale=args.scale,
+        mount_rpy_deg=mount_rpy_deg,
+        hand_mount_rpy_deg=hand_mount_rpy,
+        home_q_deg=home_q_deg,
         joint_reg_weights=reg_weights,
         joint_smooth_weights=smooth_weights,
-        swivel_limit=swivel_limit,
+        swivel_range_deg=args.swivel_range_deg,
         trust_region=trust_region,
         joint_constraints=joint_constraints,
-    )
-
-    mapper = IncrementalPoseMapper(
-        scale=args.scale,
-        allowed_hands=hands,
-        rotation_vr_to_base=mapper_rotation,
+        hand_joint_constraints=hand_joint_constraints,
         pose_filter_window_sec=args.pose_filter_window_sec,
         pose_filter_degree=args.pose_filter_degree,
         pose_filter_min_samples=args.pose_filter_min_samples,
         pose_filter_lookahead_sec=args.pose_filter_lookahead_sec,
+        no_collision=args.no_collision,
     )
-    session = ArmTeleopSession(ik_solver=ik, mapper=mapper, check_collision=not args.no_collision)
 
-    model = ik.reduced_robot.model
-    data = ik.reduced_robot.data
-    if home_q_deg is not None:
-        home_q_rad = np.deg2rad(home_q_deg)
-        if home_q_rad.shape[0] != model.nq:
-            raise SystemExit(f"home_q_deg 长度需为 {model.nq}，实际 {home_q_rad.shape[0]}")
-        lower = model.lowerPositionLimit
-        upper = model.upperPositionLimit
-        # Clamp inside URDF limits to避免边界触发不可行
-        home_q_rad = np.clip(home_q_rad, lower + 1e-6, upper - 1e-6)
-        logging.getLogger(__name__).info(
-            "应用初始关节角(度)：%s",
-            ", ".join(f"{val:.2f}" for val in home_q_deg),
-        )
-        if np.any(home_q_rad < lower) or np.any(home_q_rad > upper):
-            logging.getLogger(__name__).warning("home_q_deg 超出 URDF 关节范围，将继续尝试使用")
-        ik.set_seed(home_q_rad)
-        ik.q_last = home_q_rad.copy()
-        q_reference = home_q_rad
-    else:
-        q_reference = pin.neutral(model)
-
-    q_home = q_reference.copy()
-    pin.forwardKinematics(model, data, q_home)
-    pin.updateFramePlacements(model, data)
-    ee_id = model.getFrameId("ee")
-    if ee_id < 0 or ee_id >= len(data.oMf):
-        raise RuntimeError("无法找到名为 'ee' 的末端 Frame，请确认 IK 初始化已刷新 model/data")
-    base_pose = data.oMf[ee_id]
+    mapper_rotations: Dict[str, np.ndarray] = {}
     for hand in hands:
-        session.set_reference_pose(hand, base_pose.translation, base_pose.rotation)
+        rpy = config.rotation_rpy_for(hand)
+        rotation = _rotation_from_rpy_deg(rpy)
+        if rpy is not None:
+            logging.getLogger(__name__).info(
+                "[%s] 应用基座安装 RPY(度)：[%.2f, %.2f, %.2f]", hand, rpy[0], rpy[1], rpy[2]
+            )
+        mapper_rotations[hand] = rotation.T @ R_BV_DEFAULT
+
+    ik_map: Dict[str, BaseArmIK] = {}
+    base_poses: Dict[str, Dict[str, np.ndarray]] = {}
+    for hand in hands:
+        constraints = config.constraints_for(hand)
+        ik = BaseArmIK(
+            urdf_path=config.urdf,
+            smooth_weight=0.05,
+            position_weight=40.0,
+            orientation_weight=20.0,
+            joint_reg_weights=reg_weights,
+            joint_smooth_weights=smooth_weights,
+            swivel_limit=swivel_limit,
+            trust_region=trust_region,
+            joint_constraints=constraints,
+        )
+        model = ik.reduced_robot.model
+        data = ik.reduced_robot.data
+        if config.home_q_deg is not None:
+            home_q_rad = np.deg2rad(config.home_q_deg)
+            if home_q_rad.shape[0] != model.nq:
+                raise SystemExit(f"home_q_deg 长度需为 {model.nq}，实际 {home_q_rad.shape[0]}")
+            lower = model.lowerPositionLimit
+            upper = model.upperPositionLimit
+            home_q_rad = np.clip(home_q_rad, lower + 1e-6, upper - 1e-6)
+            logging.getLogger(__name__).info(
+                "[%s] 应用初始关节角(度)：%s",
+                hand,
+                ", ".join(f"{val:.2f}" for val in np.rad2deg(home_q_rad)),
+            )
+            if np.any(home_q_rad < lower) or np.any(home_q_rad > upper):
+                logging.getLogger(__name__).warning("[%s] home_q_deg 超出 URDF 关节范围，将继续尝试使用", hand)
+            ik.set_seed(home_q_rad)
+            ik.q_last = home_q_rad.copy()
+            q_reference = home_q_rad
+        else:
+            q_reference = pin.neutral(model)
+
+        q_home = q_reference.copy()
+        pin.forwardKinematics(model, data, q_home)
+        pin.updateFramePlacements(model, data)
+        ee_id = model.getFrameId("ee")
+        if ee_id < 0 or ee_id >= len(data.oMf):
+            raise RuntimeError("无法找到名为 'ee' 的末端 Frame，请确认 IK 初始化已刷新 model/data")
+        base_pose = data.oMf[ee_id]
+        base_poses[hand] = {"translation": base_pose.translation.copy(), "rotation": base_pose.rotation.copy()}
+        ik_map[hand] = ik
+
+    mapper = IncrementalPoseMapper(
+        scale=config.scale,
+        allowed_hands=hands,
+        rotation_vr_to_base=mapper_rotations,
+        pose_filter_window_sec=config.pose_filter_window_sec,
+        pose_filter_degree=config.pose_filter_degree,
+        pose_filter_min_samples=config.pose_filter_min_samples,
+        pose_filter_lookahead_sec=config.pose_filter_lookahead_sec,
+    )
+    registry = HandRegistry(ik_map)
+    session = ArmTeleopSession(ik_solver=registry, mapper=mapper, check_collision=not config.no_collision)
+
+    for hand, pose in base_poses.items():
+        session.set_reference_pose(hand, pose["translation"], pose["rotation"])
+
+    default_hand = sorted(hands)[0]
+    default_pose = base_poses.get(default_hand, next(iter(base_poses.values())))
 
     pipeline = TeleopPipeline(
         session=session,
         allowed_hands=hands,
-        reference_translation=base_pose.translation,
-        reference_rotation=base_pose.rotation,
+        reference_translation=default_pose["translation"],
+        reference_rotation=default_pose["rotation"],
+        per_hand_reference=base_poses,
     )
-
-    if getattr(ik, "use_meshcat", False):
-        try:
-            ik.set_visual_base_transform(mount_rotation, mount_offset)
-            ik.refresh_visual(q_reference)
-        except Exception:  # pylint: disable=broad-except
-            logging.getLogger(__name__).warning("Meshcat 根节点变换设置失败，继续使用默认朝向")
 
     return session, pipeline
 
 
 async def run_live(args: argparse.Namespace, pipeline: TeleopPipeline) -> None:
+    """启动 WebRTC 服务并运行，便于快速测试（无硬件写入）。"""
+
     stun_servers = [] if args.no_stun else list(args.stun)
     server = VRWebRTCServer(
         host=args.host,
@@ -591,7 +638,7 @@ async def run_live(args: argparse.Namespace, pipeline: TeleopPipeline) -> None:
     )
 
     await server.start()
-    logging.info("Meshcat 遥操作会话已启动，等待 VR 手柄接入……")
+    logging.info("VR 遥操作会话已启动，等待 VR 手柄接入……")
     try:
         while True:
             await asyncio.sleep(3600)
@@ -599,56 +646,11 @@ async def run_live(args: argparse.Namespace, pipeline: TeleopPipeline) -> None:
         await server.stop()
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    """命令行入口：兼容脚本运行与 setuptools entry_point."""
-
-    parsed_argv = list(argv) if argv is not None else sys.argv[1:]
-    config_parser = _create_config_parser()
-    config_args, remaining_argv = config_parser.parse_known_args(parsed_argv)
-    # 先解析/加载 JSON 配置，允许直接通过文件统一修改参数
-    config_path = pathlib.Path(config_args.config).expanduser()
-    if not config_path.is_absolute():
-        config_path = (ROOT_DIR / config_path).resolve()
-
-    default_config_path = DEFAULT_CONFIG_PATH.resolve()
-    config_data = {}
-    if config_path.exists():
-        config_data = _load_config_file(config_path)
-    elif config_path != default_config_path:
-        raise SystemExit(f"指定的配置文件不存在: {config_path}")
-
-    parser = build_arg_parser(config_parser)
-    if config_data:
-        known_dests = {action.dest for action in parser._actions}
-        defaults: Dict[str, Any] = {}
-        for key, value in config_data.items():
-            if key not in known_dests:
-                continue
-            # 仅保留解析器认可的键，逐项覆盖默认值
-            if isinstance(value, list):
-                defaults[key] = list(value)
-            else:
-                defaults[key] = value
-        parser.set_defaults(**defaults)
-
-    args = parser.parse_args(remaining_argv)
-    args.config = str(config_path)
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
-    logging.getLogger(__name__).info("使用配置文件: %s", args.config)
-
-    session, pipeline = build_session(args)
-
-    if args.replay:
-        trajectory_path = pathlib.Path(args.replay)
-        frames = list(_iter_trajectory(trajectory_path))
-        if not frames:
-            logging.error("轨迹文件为空或解析失败: %s", trajectory_path)
-            raise SystemExit(1)
-        logging.info("读取轨迹帧数：%d", len(frames))
-        _replay_trajectory_sync(session, frames, args.replay_speed, args.replay_loop)
-    else:
-        asyncio.run(run_live(args, pipeline))
-
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "TeleopPipeline",
+    "_create_config_parser",
+    "_load_config_file",
+    "build_arg_parser",
+    "build_session",
+    "run_live",
+]

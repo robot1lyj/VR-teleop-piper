@@ -25,7 +25,7 @@ from lerobot.common.robot_devices.robots.configs import RobotConfig
 from lerobot.common.robot_devices.robots.utils import Robot
 
 from robot.real.piper import PiperMotorsBus
-from scripts.run_vr_meshcat import build_session as build_meshcat_session
+from scripts.teleop_common import build_session as build_teleop_session
 from scripts.run_vr_piper import (
     PiperTeleopPipeline,
     build_parser as build_piper_parser,
@@ -180,10 +180,10 @@ class PiperVRRobot(Robot):
         if self.config.channel is not None:
             args.channel = self.config.channel
 
-        self.session, meshcat_pipeline = build_meshcat_session(args)
+        self.session, teleop_pipeline = build_teleop_session(args)
 
         self.bus_map = {}
-        target_hands = list(meshcat_pipeline.allowed_hands) if meshcat_pipeline.allowed_hands else ["piper"]
+        target_hands = list(teleop_pipeline.allowed_hands) if teleop_pipeline.allowed_hands else ["piper"]
         if not self.config.dry_run:
             for hand in target_hands:
                 overrides = hw_overrides.get(hand)
@@ -225,12 +225,12 @@ class PiperVRRobot(Robot):
         self.pipeline = build_piper_pipeline(
             args=args,
             session=self.session,
-            meshcat_pipeline=meshcat_pipeline,
+            teleop_pipeline=teleop_pipeline,
             bus_map=self.bus_map,
             hand_pipeline_overrides=hand_overrides,
         )
 
-        self._hands = tuple(meshcat_pipeline.allowed_hands)
+        self._hands = tuple(teleop_pipeline.allowed_hands)
         self.cameras = make_cameras_from_configs(self.config.cameras) if self.config.cameras else {}
         for camera in self.cameras.values():
             try:

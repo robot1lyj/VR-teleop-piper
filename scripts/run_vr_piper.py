@@ -1,6 +1,6 @@
 """VR 手柄 -> Piper 实机遥操作入口。
 
-复用 Meshcat 管线求解 IK，再将关节指令下发到 Piper 硬件。
+复用通用 VR/IK 管线求解关节角，再将指令下发到 Piper 硬件。
 """
 
 from __future__ import annotations
@@ -27,21 +27,21 @@ from scripts.piper_pipeline import (
     extract_piper_hand_configs,
     sync_reference_with_robot,
 )
-from scripts.run_vr_meshcat import (  # type: ignore[import]
+from scripts.teleop_common import (
     TeleopPipeline,
     _create_config_parser,
     _load_config_file,
-    build_arg_parser as build_meshcat_arg_parser,
-    build_session as build_meshcat_session,
+    build_arg_parser as build_teleop_arg_parser,
+    build_session as build_teleop_session,
 )
 from vr_runtime.webrtc_endpoint import VRWebRTCServer
 
 
 def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
-    """生成 Piper 遥操作 CLI 解析器，包含 Meshcat 共享参数与硬件专属参数。"""
+    """生成 Piper 遥操作 CLI 解析器，包含 VR/IK 参数与硬件专属参数。"""
 
-    parser = build_meshcat_arg_parser(parent)
-    parser.description = "VR 遥操作 Piper 实机（复用 Meshcat IK 配置）"
+    parser = build_teleop_arg_parser(parent)
+    parser.description = "VR 遥操作 Piper 实机（复用通用 IK 配置）"
     parser.add_argument(
         "--piper-config",
         default=str(DEFAULT_PIPER_CONFIG),
@@ -223,15 +223,15 @@ def _safe_shutdown(bus_map: Dict[str, Optional[PiperMotorsBus]]) -> None:
 def build_piper_pipeline(
     args: argparse.Namespace,
     session,
-    meshcat_pipeline: TeleopPipeline,
+    teleop_pipeline: TeleopPipeline,
     bus_map: Dict[str, Optional[PiperMotorsBus]],
     hand_pipeline_overrides: Dict[str, Dict[str, Any]],
 ) -> PiperTeleopPipeline:
     return PiperTeleopPipeline(
         session=session,
-        allowed_hands=meshcat_pipeline.allowed_hands,
-        reference_translation=meshcat_pipeline.reference_translation,
-        reference_rotation=meshcat_pipeline.reference_rotation,
+        allowed_hands=teleop_pipeline.allowed_hands,
+        reference_translation=teleop_pipeline.reference_translation,
+        reference_rotation=teleop_pipeline.reference_rotation,
         buses=bus_map,
         command_interval=args.command_interval,
         gripper_open=args.gripper_open,
@@ -308,8 +308,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     logger = logging.getLogger(__name__)
     logger.info("使用配置文件: %s", args.config)
 
-    session, meshcat_pipeline = build_meshcat_session(args)
-    allowed_hands = sorted(meshcat_pipeline.allowed_hands)
+    session, teleop_pipeline = build_teleop_session(args)
+    allowed_hands = sorted(teleop_pipeline.allowed_hands)
     if not allowed_hands:
         raise SystemExit("配置未启用任何手柄，无法建立遥操作链路")
 
@@ -321,7 +321,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         dry_run=args.dry_run,
     )
 
-    pipeline = build_piper_pipeline(args, session, meshcat_pipeline, bus_map, hand_pipeline_overrides)
+    pipeline = build_piper_pipeline(args, session, teleop_pipeline, bus_map, hand_pipeline_overrides)
 
     if not args.dry_run:
         _sync_joint_reference(session, pipeline, bus_map)

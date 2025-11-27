@@ -17,7 +17,7 @@ import pinocchio as pin
 
 from robot.real.piper import PiperMotorsBus
 from robot.teleop import ArmTeleopSession
-from scripts.run_vr_meshcat import TeleopPipeline
+from scripts.teleop_common import TeleopPipeline
 
 __all__ = [
     "JointCommandFilter",
@@ -462,7 +462,7 @@ def _coerce_limits(values: Sequence[float], dof: int, name: str) -> List[float]:
 
 
 class PiperTeleopPipeline(TeleopPipeline):
-    """在 Meshcat 版基础上加入 Piper 机械臂命令下发，并支持多手柄。"""
+    """在通用 VR/IK 管线基础上加入 Piper 机械臂命令下发，并支持多手柄。"""
 
     def __init__(
         self,
@@ -496,7 +496,18 @@ class PiperTeleopPipeline(TeleopPipeline):
         self._joint_lower: Optional[np.ndarray] = None
         self._joint_upper: Optional[np.ndarray] = None
 
-        reduced = getattr(session.ik_solver, "reduced_robot", None)
+        per_hand_refs = getattr(self, "per_hand_reference", {})
+        for hand, pose in per_hand_refs.items():
+            try:
+                self._hand_reference[hand] = (
+                    np.asarray(pose["translation"], dtype=float).reshape(3),
+                    np.asarray(pose["rotation"], dtype=float).reshape(3, 3),
+                )
+            except Exception:
+                continue
+
+        ik_for_limits = session.get_ik() if hasattr(session, "get_ik") else getattr(session, "ik_solver", None)
+        reduced = getattr(ik_for_limits, "reduced_robot", None)
         model = getattr(reduced, "model", None)
         if model is not None:
             self._joint_lower = np.asarray(model.lowerPositionLimit, dtype=float).copy()
@@ -505,12 +516,12 @@ class PiperTeleopPipeline(TeleopPipeline):
         else:
             dof_value = 0
         if dof_value <= 0:
-            dof_value = len(getattr(session.ik_solver, "q_seed", []))
+            dof_value = len(getattr(ik_for_limits, "q_seed", []))
         if dof_value <= 0:
             dof_value = 6
         if self._joint_lower is None or self._joint_upper is None:
             try:
-                robot_model = session.ik_solver.reduced_robot.model
+                robot_model = ik_for_limits.reduced_robot.model  # type: ignore[union-attr]
                 self._joint_lower = np.asarray(robot_model.lowerPositionLimit, dtype=float).copy()
                 self._joint_upper = np.asarray(robot_model.upperPositionLimit, dtype=float).copy()
             except Exception:
@@ -843,25 +854,26 @@ def sync_reference_with_robot(
 ) -> None:
     """使用真实机械臂当前关节角刷新 IK 种子与手柄参考位姿。"""
 
-    ik = session.ik_solver
-    model = ik.reduced_robot.model
-    data = ik.reduced_robot.data
+    target_hands = [hand] if hand is not None else list(pipeline.allowed_hands)
+    if not target_hands:
+        target_hands = list(pipeline.allowed_hands)
 
-    q = np.asarray(joints_rad, dtype=float).reshape(model.nq)
-    pin.forwardKinematics(model, data, q)
-    pin.updateFramePlacements(model, data)
+    for target in target_hands:
+        ik = session.get_ik(target) if hasattr(session, "get_ik") else session.ik_solver
+        model = ik.reduced_robot.model
+        data = ik.reduced_robot.data
 
-    ee_id = model.getFrameId("ee")
-    if ee_id < 0 or ee_id >= len(data.oMf):
-        raise RuntimeError("无法找到末端 Frame 'ee'，请检查 URDF 配置")
+        q = np.asarray(joints_rad, dtype=float).reshape(model.nq)
+        pin.forwardKinematics(model, data, q)
+        pin.updateFramePlacements(model, data)
 
-    ee_pose = data.oMf[ee_id]
-    ik.set_seed(q)
-    ik.q_last = q.copy()
+        ee_id = model.getFrameId("ee")
+        if ee_id < 0 or ee_id >= len(data.oMf):
+            raise RuntimeError("无法找到末端 Frame 'ee'，请检查 URDF 配置")
 
-    targets = [hand] if hand is not None else list(pipeline.allowed_hands)
-    if not targets:
-        targets = list(pipeline.allowed_hands)
-    for target in targets:
+        ee_pose = data.oMf[ee_id]
+        ik.set_seed(q)
+        ik.q_last = q.copy()
+
         pipeline._set_hand_reference(target, ee_pose.translation, ee_pose.rotation)
         pipeline.prime_joint_filter(target, joints_rad)

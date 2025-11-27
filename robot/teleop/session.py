@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
 
 import math
 
@@ -11,6 +11,7 @@ import numpy as np
 import pinocchio as pin
 
 from robot.ik import BaseArmIK
+from .hand_registry import HandRegistry
 
 from .incremental_mapper import IncrementalPoseMapper, TeleopGoal
 
@@ -34,11 +35,21 @@ class ArmTeleopSession:
 
     def __init__(
         self,
-        ik_solver: BaseArmIK,
+        ik_solver: BaseArmIK | Mapping[str, BaseArmIK] | HandRegistry,
         mapper: Optional[IncrementalPoseMapper] = None,
         check_collision: bool = True,
     ) -> None:
-        self.ik_solver = ik_solver
+        if isinstance(ik_solver, HandRegistry):
+            self._hand_registry = ik_solver
+            self.ik_solver: BaseArmIK = ik_solver.get()
+        elif isinstance(ik_solver, Mapping):
+            if not ik_solver:
+                raise ValueError("ik_solver mapping must not be empty")
+            self._hand_registry = HandRegistry(dict(ik_solver))
+            self.ik_solver = self._hand_registry.get()
+        else:
+            self._hand_registry = HandRegistry({"default": ik_solver})
+            self.ik_solver = ik_solver
         self.mapper = mapper or IncrementalPoseMapper()
         self.check_collision = bool(check_collision)
         model = self.ik_solver.reduced_robot.model
@@ -94,7 +105,8 @@ class ArmTeleopSession:
         results: List[TeleopResult] = []
 
         for goal in goals:
-            self.ik_solver.set_gripper_state(goal.gripper_closed)
+            ik = self.get_ik(goal.hand)
+            ik.set_gripper_state(goal.gripper_closed)
             target = pin.SE3(goal.rotation, goal.position)
 
             if goal.pitch_mode:
@@ -112,7 +124,7 @@ class ArmTeleopSession:
                 )
                 continue
 
-            joints, success, info = self.ik_solver.solve(target, check_collision=self.check_collision)
+            joints, success, info = ik.solve(target, check_collision=self.check_collision)
             if isinstance(joints, np.ndarray):
                 joints_array: Optional[np.ndarray] = joints.copy()
             elif joints is None:
@@ -135,6 +147,11 @@ class ArmTeleopSession:
             )
 
         return results
+
+    def get_ik(self, hand: Optional[str] = None) -> BaseArmIK:
+        """按手柄返回 IK 求解器，未指定时返回默认实例。"""
+
+        return self._hand_registry.get(hand)
 
     @staticmethod
     def _wrap_angle(value: float) -> float:
