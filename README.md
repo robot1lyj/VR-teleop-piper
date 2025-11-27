@@ -153,7 +153,7 @@
   python scripts/run_vr_piper.py --config configs/piper_teleop_dual.json --piper-config configs/piper_teleop_dual.json
   ```
 - `piper_teleop.json` / `piper_teleop_left.json` / `piper_teleop_dual.json` 中的 `mount_rpy_deg` 控制 VR → 基座旋转映射（注意该角度会在代码中取转置后生效）；`piper_arms` 字段可为左右臂提供各自的 CAN 名称与初始/禁用姿态。
-- 遥操作链路默认启用了两段滤波：`pose_filter_*`（VR 位姿时间窗平滑 + 前视预测）与 `velocity_filter_window`（关节速度前馈），可在配置或命令行调整。
+- 遥操作链路默认启用了两段平滑：`pose_filter_*`（VR 位姿时间窗平滑 + 前视预测）与 `velocity_filter_window`（关节速度前馈，用于限速/限加前的均值），可在配置或命令行调整。
 
 ### 配置文件说明
 
@@ -222,8 +222,8 @@
       --config configs/piper_teleop_dual.json \
       --piper-config configs/piper_teleop_dual.json
   ```
-  该脚本会复用 `scripts/teleop_common.py` 的 IK/映射设置，并按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，再由 `scripts/piper_pipeline.py` 中的多臂 `PiperTeleopPipeline` 将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open/--effort-samples` 等参数即可调整指令频率、手爪目标和扭矩采样策略；当配置文件内包含 `piper_arms.left/right` 字段时，脚本会自动为每只手臂构造独立的 CAN 总线、遥测与滤波。若未显式指定 `--piper-config`，依旧会默认复用 `--config` 所指向的 JSON。
-- 遥操作链路默认启用了两段滤波：`pose_filter_*` 参数（窗口 0.8 s、二阶拟合）在 `IncrementalPoseMapper` 中对 VR 位姿做时间窗平滑+前视预测，`velocity_filter_window`（默认 5 帧）则用于在关节空间平均速度并作为 `JointCommandFilter` 的前馈，进一步抑制加速度冲击。需要更灵敏或更平滑时，可在命令行传 `--pose-filter-window-sec / --velocity-filter-window` 或直接修改 `configs/piper_teleop.json` / `configs/piper_recording.json`，同时 `joint_speed_limits_deg` / `joint_acc_limits_deg` 仍由配置控制，确保机械臂速度限制可一致管理。
+  该脚本会复用 `scripts/teleop_common.py` 的 IK/映射设置，并按需调用 `PiperMotorsBus.connect()`、`apply_calibration()`，再由 `scripts/piper_pipeline.py` 中的多臂 `PiperTeleopPipeline` 将关节结果写入实机。通过配置文件或 `--command-interval/--gripper-open` 等参数即可调整指令频率和手爪目标；当配置文件内包含 `piper_arms.left/right` 字段时，脚本会自动为每只手臂构造独立的 CAN 总线、遥测与滤波。若未显式指定 `--piper-config`，依旧会默认复用 `--config` 所指向的 JSON。
+- 遥操作链路默认启用了两段平滑：`pose_filter_*` 参数（窗口 0.8 s、二阶拟合）在 `IncrementalPoseMapper` 中对 VR 位姿做时间窗平滑+前视预测，`velocity_filter_window`（默认 5 帧）用于在关节空间平均速度并作为 `JointCommandFilter` 的前馈；`JointCommandFilter` 采用二阶阻尼+限速/限加，抑制关节层抖动。需要更灵敏或更平滑时，可在命令行传 `--pose-filter-window-sec / --velocity-filter-window` 或直接修改 `configs/piper_teleop.json` / `configs/piper_recording.json`，同时 `joint_speed_limits_deg` / `joint_acc_limits_deg` 仍由配置控制，确保机械臂速度限制可一致管理。
 - 若需要手动对接或进一步定制，可继续参考 `ArmTeleopSession` / `IncrementalPoseMapper` 的组合：
   1. `PiperMotorsBus.connect()` 使能 → `apply_calibration()` 对齐零位。
   2. 在 Teleop 循环中调用 `bus.write(target_joint=q.tolist())`；若遇异常立即调用 `safe_disconnect()` 并下电。

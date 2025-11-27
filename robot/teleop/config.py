@@ -24,6 +24,7 @@ class TeleopConfig:
     scale: float
     mount_rpy_deg: Optional[np.ndarray] = None
     hand_mount_rpy_deg: Dict[str, np.ndarray] = field(default_factory=dict)
+    hand_home_q_deg: Dict[str, np.ndarray] = field(default_factory=dict)
     home_q_deg: Optional[np.ndarray] = None
     joint_reg_weights: Optional[List[float]] = None
     joint_smooth_weights: Optional[List[float]] = None
@@ -46,6 +47,7 @@ class TeleopConfig:
         scale: float,
         mount_rpy_deg: Any,
         hand_mount_rpy_deg: Dict[str, Any],
+        hand_home_q_deg: Dict[str, Any],
         home_q_deg: Any,
         joint_reg_weights: Any,
         joint_smooth_weights: Any,
@@ -68,6 +70,12 @@ class TeleopConfig:
                 continue
             per_hand_rpy[hand] = _as_rpy_array(val)  # type: ignore[arg-type]
 
+        per_hand_home: Dict[str, np.ndarray] = {}
+        for hand, val in hand_home_q_deg.items():
+            if hand not in {"left", "right"}:
+                continue
+            per_hand_home[hand] = np.asarray(val, dtype=float).reshape(-1)
+
         per_hand_constraints: Dict[str, Dict[str, Any]] = {}
         for hand, val in hand_joint_constraints.items():
             if hand not in {"left", "right"}:
@@ -81,6 +89,7 @@ class TeleopConfig:
             scale=float(scale),
             mount_rpy_deg=mount_rpy,
             hand_mount_rpy_deg=per_hand_rpy,
+            hand_home_q_deg=per_hand_home,
             home_q_deg=home_q,
             joint_reg_weights=None if joint_reg_weights is None else list(joint_reg_weights),
             joint_smooth_weights=None if joint_smooth_weights is None else list(joint_smooth_weights),
@@ -104,6 +113,11 @@ class TeleopConfig:
         if hand in self.hand_joint_constraints:
             return self.hand_joint_constraints[hand]
         return self.joint_constraints
+
+    def home_q_for(self, hand: str) -> Optional[np.ndarray]:
+        if hand in self.hand_home_q_deg:
+            return self.hand_home_q_deg[hand]
+        return self.home_q_deg
 
 
 __all__ = ["TeleopConfig"]

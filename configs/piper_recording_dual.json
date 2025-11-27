@@ -3,7 +3,7 @@
   "host": "0.0.0.0",
   "port": 8442,
   "channel": "controller",
-  "scale": 1,
+  "scale": 1.2,
   "hands": "both",
   "no_stun": true,
   "stun": [],
@@ -57,8 +57,8 @@
   "pose_filter_min_samples": 15,
   "pose_filter_lookahead_sec": 0.02,
   "velocity_filter_window": 5,
-  "joint_speed_limits_deg": [120.0, 120.0, 120.0, 150.0, 150.0, 150.0],
-  "joint_acc_limits_deg": [200.0, 200.0, 200.0, 250.0, 250.0, 250.0],
+  "joint_speed_limits_deg": [180.0, 195.0, 180.0, 225.0, 225.0, 225.0],
+  "joint_acc_limits_deg": [300.0, 300.0, 300.0, 350.0, 350.0, 350.0],
   "joint_error_deadband_deg": 0.12,
   "piper_arms": {
     "left": {
@@ -72,6 +72,15 @@
       "init_joint_position": [-25.0, 120.0, -100.0, -80.0, 30.0, -50.0, 0.0],
       "safe_disable_position": [-25.0, 120.0, -100.0, -80.0, 30.0, -50.0, 0.0],
       "joint_factor": 57296.0
+    }
+  },
+  "cameras": {
+    "right_wrist_rgb": {
+      "type": "opencv",
+      "camera_index": 0,
+      "fps": 30,
+      "width": 640,
+      "height": 480
     }
   }
 }

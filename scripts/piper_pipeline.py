@@ -247,9 +247,6 @@ class _ArmState:
     telemetry: TelemetryLogger
     velocity_window: int
     stop_event: threading.Event
-    effort_samples: int
-    effort_interval: float
-    effort_mode: str
     command_lock: threading.Lock = field(default_factory=threading.Lock)
     command_event: threading.Event = field(default_factory=threading.Event)
     worker: Optional[threading.Thread] = None
@@ -261,7 +258,6 @@ class _ArmState:
     last_gripper_target: Optional[float] = None
     last_write_duration_ms: Optional[float] = None
     last_queue_delay_ms: Optional[float] = None
-    last_gripper_effort: Optional[float] = None
     velocity_history: Deque[np.ndarray] = field(default_factory=deque)
     last_ik_state: Optional[Tuple[float, np.ndarray]] = None
     pitch_mode_active: bool = False
@@ -348,15 +344,6 @@ class _ArmState:
                     duration_ms,
                     queue_delay_ms,
                 )
-
-                if self.effort_samples > 0:
-                    effort = self.bus.read_gripper_effort(
-                        samples=self.effort_samples,
-                        interval=self.effort_interval,
-                        mode=self.effort_mode,
-                    )
-                    with self.metrics_lock:
-                        self.last_gripper_effort = float(effort)
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("[%s] 写入 Piper 指令失败: %s", self.hand, exc)
             finally:
@@ -441,7 +428,6 @@ class _ArmState:
             self.last_gripper_target = None
         self.telemetry.reset_pending()
         self.reset_velocity_history()
-        self.last_gripper_effort = None
         self.last_queue_delay_ms = None
         self.last_write_duration_ms = None
         self.pitch_mode_active = False
@@ -476,9 +462,6 @@ class PiperTeleopPipeline(TeleopPipeline):
         gripper_open: float,
         gripper_closed: float,
         dry_run: bool,
-        effort_samples: int,
-        effort_interval: float,
-        effort_mode: str,
         joint_speed_limits_deg: Sequence[float],
         joint_acc_limits_deg: Sequence[float],
         joint_error_deadband_deg: float,
@@ -561,9 +544,6 @@ class PiperTeleopPipeline(TeleopPipeline):
                 ),
                 velocity_window=state_velocity_window,
                 stop_event=self._stop_event,
-                effort_samples=int(overrides.get("effort_samples", effort_samples)),
-                effort_interval=float(overrides.get("effort_interval", effort_interval)),
-                effort_mode=str(overrides.get("effort_mode", effort_mode)).lower(),
             )
             state.start_worker()
             self._arms[hand] = state
@@ -696,8 +676,6 @@ class PiperTeleopPipeline(TeleopPipeline):
                     summary["last_write_ms"] = state.last_write_duration_ms
                 if state.last_queue_delay_ms is not None:
                     summary["last_queue_delay_ms"] = state.last_queue_delay_ms
-                if state.last_gripper_effort is not None:
-                    summary["gripper_effort"] = state.last_gripper_effort
 
             summaries.append(summary)
 
@@ -824,9 +802,6 @@ def extract_piper_hand_configs(config: Dict[str, Any]) -> tuple[Dict[str, Dict[s
         "gripper_open",
         "gripper_closed",
         "command_interval",
-        "effort_samples",
-        "effort_interval",
-        "effort_mode",
         "velocity_filter_window",
         "telemetry_file",
     }

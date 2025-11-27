@@ -34,3 +34,32 @@ PiperTeleopPipeline (队列/滤波/遥测/硬件下发)
 ### 待续方向
 - 把硬件适配（Piper bus/遥测）与控制平面进一步解耦，提供 mock 硬件以便 CI 回放。
 - 增加配置校验/指纹打印及最小回放测试，确保每次修改可快速复现。
+
+## 2025-11-27：配置精简与起始姿态对齐
+
+### 配置加载链路
+```
+configs/piper_teleop*.json
+      │
+      ▼
+teleop_config.py (TeleopConfig.from_args)  <- hand_mount_rpy_deg / hand_home_q_deg
+      │
+      ▼
+teleop_common.build_session -> per-hand IK seeds +参考位姿
+      │
+      ▼
+PiperTeleopPipeline (硬件总线覆盖 piper_arms)
+```
+
+### 改动内容
+- 删除未使用的配置项：`no_meshcat`、`mount_offset`、`replay*`，避免误导与重复。
+- 统一安装姿态写法：单臂配置改用 `hand_mount_rpy_deg` 明确手侧，去掉全局空 `mount_rpy_deg`。
+- 起始姿态单一来源：将 `home_q_deg` 与硬件 `init_joint_position` 对齐，双臂配置使用 `hand_home_q_deg` 分别 warm-start。
+- 暂时移除夹爪扭矩采样：去掉 `effort_samples/interval/mode` 相关 CLI、配置与写入线程逻辑，避免下发阻塞，后续需要再按需并行重引入。
+- 关节滤波恢复二阶阻尼：`JointCommandFilter` 回到 PD（临界阻尼）+限速/限加方案，避免关节层摆动；如需降延迟可在未来改为可配置开关。
+- 新增双臂采集配置：增加 `configs/piper_recording_dual.json`，与双臂 teleop 配置保持一致（per-hand 安装角/起始姿态/约束/速度限幅），并内置右腕相机示例配置。
+
+### 改动必要性
+- 减少噪声字段，降低“填但未用”的认知成本。
+- 明确 per-hand 安装角/起始角，避免重握时跳回中性位或左右共用姿态导致漂移。
+- 为后续配置校验与自动指纹打印打基础，便于上线前快速核对现场参数。

@@ -76,24 +76,6 @@ def build_parser(parent: Optional[argparse.ArgumentParser] = None) -> argparse.A
         help="启动时跳过 apply_calibration()，避免自动回到初始位姿",
     )
     parser.add_argument(
-        "--effort-samples",
-        type=int,
-        default=0,
-        help="发送指令后采样夹爪扭矩的次数，0 表示不读取",
-    )
-    parser.add_argument(
-        "--effort-interval",
-        type=float,
-        default=0.02,
-        help="夹爪扭矩连续采样间隔（秒）",
-    )
-    parser.add_argument(
-        "--effort-mode",
-        choices=["mean", "median", "max", "min", "last"],
-        default="mean",
-        help="夹爪扭矩采样聚合方式",
-    )
-    parser.add_argument(
         "--joint-speed-limits-deg",
         type=float,
         nargs="+",
@@ -237,9 +219,6 @@ def build_piper_pipeline(
         gripper_open=args.gripper_open,
         gripper_closed=args.gripper_closed,
         dry_run=args.dry_run,
-        effort_samples=args.effort_samples,
-        effort_interval=args.effort_interval,
-        effort_mode=args.effort_mode,
         joint_speed_limits_deg=args.joint_speed_limits_deg,
         joint_acc_limits_deg=args.joint_acc_limits_deg,
         joint_error_deadband_deg=args.joint_error_deadband_deg,

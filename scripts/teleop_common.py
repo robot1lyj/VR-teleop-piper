@@ -233,6 +233,37 @@ def _parse_home_q_deg(value: Any) -> np.ndarray | None:
         raise ValueError("home_q_deg 必须全部为浮点数") from exc
 
 
+def _parse_hand_home_q_deg(value: Any) -> Dict[str, np.ndarray]:
+    """解析按手柄提供的初始关节角（度），支持 JSON/dict。"""
+
+    if value is None:
+        return {}
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:  # pylint: disable=broad-except
+            raise ValueError(f"hand_home_q_deg JSON 解析失败: {exc}") from exc
+    else:
+        parsed = value
+
+    if not isinstance(parsed, dict):
+        raise ValueError("hand_home_q_deg 需要是对象，键为 left/right")
+
+    result: Dict[str, np.ndarray] = {}
+    for hand, val in parsed.items():
+        if hand not in {"left", "right"}:
+            continue
+        parsed_home = _parse_home_q_deg(val)
+        if parsed_home is None:
+            continue
+        result[hand] = parsed_home
+    return result
+
+
 def _rotation_from_rpy_deg(rpy_deg: np.ndarray | None) -> np.ndarray:
     """将 RPY 角（度）转换为旋转矩阵，未指定则返回单位矩阵。"""
 
@@ -457,6 +488,10 @@ def build_arg_parser(config_parent: argparse.ArgumentParser | None = None) -> ar
         help="自定义初始关节角（度），按 joint1..jointN 顺序提供，例如 '0,-45,30,0,15,0'",
     )
     parser.add_argument(
+        "--hand-home-q-deg",
+        help="按手柄提供初始关节角（度），JSON 对象，例如 '{\"left\":[25,120,-100,80,30,0],\"right\":[-25,120,-100,-80,30,-50]}'",
+    )
+    parser.add_argument(
         "--hand-joint-constraints",
         help="按手柄提供关节约束（JSON 对象），键为 left/right，值与 joint_constraints 格式一致",
     )
@@ -504,6 +539,11 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         raise SystemExit(f"初始关节角解析失败: {exc}")
 
     try:
+        hand_home_q_deg = _parse_hand_home_q_deg(getattr(args, "hand_home_q_deg", None))
+    except ValueError as exc:
+        raise SystemExit(f"按手柄初始关节角解析失败: {exc}")
+
+    try:
         hand_joint_constraints = _parse_hand_joint_constraints(getattr(args, "hand_joint_constraints", None))
     except ValueError as exc:
         raise SystemExit(f"按手柄关节约束解析失败: {exc}")
@@ -525,6 +565,7 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         scale=args.scale,
         mount_rpy_deg=mount_rpy_deg,
         hand_mount_rpy_deg=hand_mount_rpy,
+        hand_home_q_deg=hand_home_q_deg,
         home_q_deg=home_q_deg,
         joint_reg_weights=reg_weights,
         joint_smooth_weights=smooth_weights,
@@ -566,8 +607,9 @@ def build_session(args: argparse.Namespace) -> tuple[ArmTeleopSession, TeleopPip
         )
         model = ik.reduced_robot.model
         data = ik.reduced_robot.data
-        if config.home_q_deg is not None:
-            home_q_rad = np.deg2rad(config.home_q_deg)
+        home_q_deg_for_hand = config.home_q_for(hand)
+        if home_q_deg_for_hand is not None:
+            home_q_rad = np.deg2rad(home_q_deg_for_hand)
             if home_q_rad.shape[0] != model.nq:
                 raise SystemExit(f"home_q_deg 长度需为 {model.nq}，实际 {home_q_rad.shape[0]}")
             lower = model.lowerPositionLimit
