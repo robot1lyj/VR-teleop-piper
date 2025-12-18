@@ -1,0 +1,106 @@
+Metadata-Version: 2.4
+Name: vr-teleop-piper
+Version: 0.1.0
+Summary: VR teleoperation toolkit for the Piper arm with lerobot data collection
+Author-email: robot1lyj <991348580@qq.com>
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: aiortc<1.14,>=1.13
+Requires-Dist: websockets>=11.0
+Requires-Dist: numpy>=1.23
+Requires-Dist: scipy>=1.10
+Requires-Dist: casadi>=3.6
+Requires-Dist: opencv-python>=4.7
+Requires-Dist: pyserial>=3.5
+Requires-Dist: pyyaml>=6.0
+
+# VR-Teleop-Piper 快速指南
+
+本仓库聚焦两件事：
+- **VR 遥操作**：Web 前端 + WebRTC 信令内置在 `run_vr_piper.py`，直接把手柄增量映射到 Piper 机械臂。
+- **数据采集**：同样的管线驱动录制脚本/Qt 录制器，输出 JSONL 轨迹与可选视频。
+
+## 环境
+- Python 3.11.7，推荐 Conda 环境：`conda create -n teleop python=3.11.7`，`conda activate teleop`
+- 依赖：`pip install -r requirements.txt`
+        "pip install -e ."
+
+## 仓库结构（精简）
+- `web-ui/`：VR 页面（A-Frame），浏览器/头显访问 `http://<host>:8080`。
+- `vr_runtime/`：内置信令与手柄解析，由 `run_vr_piper.py` 调用。
+- `scripts/`：遥操作/录制入口（`run_vr_piper.py`、`record_vr_trajectory.py`、`qt_recorder.py`）。
+- `configs/`：遥操作/录制配置（单臂、双臂、吊装、无约束）。
+- `robot/`：增量映射、IK、约束与 Piper 硬件封装。
+
+## VR 遥操作（实机/干跑通用）
+1) 启动网页：
+   ```bash
+   python -m http.server 8080 --directory web-ui
+   ```
+   头显/浏览器访问 `http://<host>:8080`，连接地址填 `ws://<host>:8442`，点「连接」。
+
+2) 启动遥操作（内置信令，无需额外信令脚本）：
+   ```bash
+   python scripts/run_vr_piper.py --config configs/piper_teleop.json \
+     --telemetry-file output/telemetry.jsonl  # 可选，记录遥测
+   ```
+   - 干跑：加 `--dry-run` 仅看 IK/命令，不下发硬件。
+   - 左臂：`--config configs/piper_teleop_left.json`
+   - 双臂：`--config configs/piper_teleop_dual.json --piper-config configs/piper_teleop_dual.json`
+
+3) 关键配置（`configs/piper_teleop*.json`）：
+   - `can_name`、`init_joint_position`、`safe_disable_position`：按现场硬件填写（角度单位度）。
+   - 限速/限加：默认约 114.6°/s、200.5°/s²（2 rad/s、3.5 rad/s²）。
+   - `command_interval`: 0.02（≈50 Hz），发送线程只发最新命令并带 20 ms 写超时。
+   - 前端发送频率：`web-ui/vr_app.js` 的 `controller-stream` 默认 `interval=10ms`（≈100 Hz）；需要降低频率可在页面属性覆盖，如 `controller-stream="interval: 20"` 退回 50 Hz.
+   - 信赖域/死区：`trust_region=0.1`，`joint_error_deadband_deg=0.08`。
+   - 旋转映射：`hand_mount_rpy_deg` 设安装角（左右臂相反号）。
+   - 安装对齐提醒：机械臂基座安装角、手柄安装角需要与现场一致；头显朝向应与机械臂基座坐标系一致，否则先调整 `hand_mount_rpy_deg` 或重新校准。
+
+## 数据采集
+- CLI 录制（单臂示例）：
+  ```bash
+  python scripts/record_vr_trajectory.py --config configs/piper_recording.json \
+    --telemetry-file output/telemetry.json
+  ```
+- Qt 录制器（多相机预览）：
+  ```bash
+  python scripts/qt_recorder.py --repo-id local/piper_vr_demo \
+    --teleop-config configs/piper_recording.json \
+    --hardware-config configs/piper_recording.json \
+    --fps 30 --resume \
+    --single-task "teleop" \  # 任务标签，写入每帧 task 字段，可改为自定义描述
+    --telemetry-file output/telemetry.jsonl --telemetry-sample-measured  # 可选：输出遥测
+  ```
+- 列出可用相机索引：
+  ```bash
+  python lerobot/common/robot_devices/cameras/opencv.py --images-dir output/cam_probe
+  ```
+
+### Qt 录制器流程与按钮逻辑
+- 启动后界面会先回零，状态显示“回零完成，等待握持/开始按钮”后进入待机。
+- “开始录制”按钮是开关（点亮=录制允许），握持上升沿开始录制，松开结束；结束后后台保存（含视频时会编码）。帧数少于 `--min-frames` 只提示“帧数偏少”但仍会保存，帧数为 0 会直接丢弃不写集。
+- 自动防抖：握持不活跃超过 0.3s 且帧数已达 `min_frames` 才因不活跃停下，避免未松开就被立刻保存的短集。
+- “放弃上一集”在回零完成且非录制/保存时可用：硬删除上一集的 parquet/视频/统计并重建 meta/hf_dataset；操作前会弹确认，保存/录制中不可用；无法删到 0 集，至少保留一集，否则会提示失败。
+- “下一集（回零）”在非录制/非保存时触发回零，清空当前缓存；“回到零点”是手动回零补偿，录制/保存中会被忽略。
+- 保存过程中顶部进度条转圈，录制/下一集按钮被禁用；请等待完成后再操作。
+- 日志区会提示每次开始/结束/放弃/低帧警告，回零失败时会解锁按钮并提示需手动回零。
+
+## 遥测与排查
+- 开启遥测：`--telemetry-file output/telemetry.jsonl [--telemetry-sample-measured]`
+- 可视化：`python scripts/plot_telemetry.py output/telemetry.jsonl --save output/telemetry`
+- 关注字段：`queue_delay_ms`（发送排队）、`write_ms`（硬件写耗时）、`dt_send`（指令间隔）。
+
+## 常用命令速查
+- 启动网页：`python -m http.server 8080 --directory web-ui`
+- 遥操作（右臂）：`python scripts/run_vr_piper.py --config configs/piper_teleop.json`
+- 遥操作干跑：`python scripts/run_vr_piper.py --config configs/piper_teleop.json --dry-run`
+- 左臂：`python scripts/run_vr_piper.py --config configs/piper_teleop_left.json`
+- 双臂：`python scripts/run_vr_piper.py --config configs/piper_teleop_dual.json --piper-config configs/piper_teleop_dual.json`
+- 录制：`python scripts/record_vr_trajectory.py --config configs/piper_recording.json`
+- 相机索引探测：`python lerobot/common/robot_devices/cameras/opencv.py --images-dir output/cam_probe`
+- 录制后视频编码：`python scripts/postprocess_encode_videos.py --root ~/data/local/pen3 --repo-id local/pen3 --overwrite`
+
+## 提示
+- 默认信令内置在遥操作/录制脚本里，无需单独运行 `vr_runtime.controller_pipeline`。
+- 调整配置后记得在 `record.md` 留痕，说明改动原因与必要性。

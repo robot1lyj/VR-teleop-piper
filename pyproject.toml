@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vr-teleop-piper"
+version = "0.1.0"
+description = "VR teleoperation toolkit for the Piper arm with lerobot data collection"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "robot1lyj", email = "991348580@qq.com" }
+]
+dependencies = [
+    "aiortc>=1.13,<1.14",
+    "websockets>=11.0",
+    "numpy>=1.23",
+    "scipy>=1.10",
+    "casadi>=3.6",
+    "opencv-python>=4.7",
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+run-vr-piper = "scripts.run_vr_piper:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "vr_runtime*",
+    "robot*",
+    "lerobot*",
+    "scripts*",
+]
+
+[tool.setuptools.package-data]
+"vr_runtime" = ["*.pyi"]
+
+[tool.setuptools.data-files]
+"configs" = ["configs/*.json"]
+"piper_description/urdf" = ["piper_description/urdf/*.urdf"]
+"piper_description/meshes" = ["piper_description/meshes/*"]
+"web-ui" = ["web-ui/*.html", "web-ui/*.js", "web-ui/*.css"]
+"web-ui/vendor" = ["web-ui/vendor/*.js"]

@@ -1,0 +1,47 @@
+{
+  "urdf": "piper_description/urdf/piper_description.urdf",
+  "host": "0.0.0.0",
+  "port": 8442,
+  "channel": "controller",
+  "scale": 0.8,
+  "hands": "right",
+  "no_stun": true,
+  "stun": [],
+  "log_level": "info",
+  "no_collision": true,
+  "hand_mount_rpy_deg": {
+    "right": [75.0, 0.0, 0.0]
+  },
+  "home_q_deg": [-25.0, 120.0, -100.0, -80.0, 30.0, 0],
+  "joint_reg_weights": [5.0, 3.0, 3.0, 5.0, 2.0, 1.0],
+  "joint_smooth_weights": [10.0, 10, 8.0, 15.0, 10, 1.0],
+  "swivel_range_deg": 30,
+  "trust_region": [0.25, 0.25, 0.25, 0.1, 0.55, 0.20],
+  "joint_constraints": {
+    "step_limits_deg": {
+      "joint4": 8
+    },
+    "hard_limits_deg": {
+      "joint4": [-90, -70],
+      "joint6": [-60, 40]
+    }
+  },
+  "command_interval": 0.0111,
+  "gripper_open": 0.6,
+  "gripper_closed": 0.0,
+  "pose_filter_window_sec": 0.8,
+  "pose_filter_degree": 2,
+  "pose_filter_min_samples": 15,
+  "pose_filter_lookahead_sec": 0.02,
+  "velocity_filter_window": 5,
+  "joint_speed_limits_deg": [180.0, 195.0, 180.0, 225.0, 225.0, 225.0],
+  "joint_acc_limits_deg": [300, 300.0, 300.0, 350.0, 350.0, 350.0],
+  "joint_error_deadband_deg": 0.12,
+  "can_name": "can_right",
+  "init_joint_position": [-25, 120.0, -100.0, -80.0, 30, 0, 0],
+  "safe_disable_position": [-25, 120.0, -100.0, -80.0, 30, 0, 0],
+  "joint_factor": 57296.0,
+  "cameras": {
+    
+  }
+}

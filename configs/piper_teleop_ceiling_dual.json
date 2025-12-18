@@ -1,0 +1,68 @@
+{
+  "urdf": "piper_description/urdf/piper_description.urdf",
+  "host": "0.0.0.0",
+  "port": 8442,
+  "channel": "controller",
+  "scale": 1,
+  "hands": "both",
+  "no_stun": true,
+  "stun": [],
+  "log_level": "info",
+  "no_collision": true,
+  "hand_mount_rpy_deg": {
+    "left": [180.0, 0.0, 0.0],
+    "right": [180.0, 0.0, 0.0]
+  },
+  "hand_home_q_deg": {
+    "left": [25.0, 120.0, -100.0, 80.0, 30.0, 0.0],
+    "right": [-25.0, 120.0, -100.0, -80.0, 30.0, -50.0]
+  },
+  "joint_reg_weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  "joint_smooth_weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  "swivel_range_deg": null,
+  "trust_region": 0.1,
+  "joint_constraints": {
+    "hard_limits_deg": {
+      "joint6": [-60, -40]
+    }
+  },
+  "hand_joint_constraints": {
+    "left": {
+      "hard_limits_deg": {
+        "joint4": [70, 90],
+        "joint6": [-90, 90]
+      }
+    },
+    "right": {
+      "hard_limits_deg": {
+        "joint4": [-90, -70],
+        "joint6": [-60, -40]
+      }
+    }
+  },
+  "command_interval": 0.0111,
+  "gripper_open": 0.6,
+  "gripper_closed": 0.0,
+  "pose_filter_window_sec": 0.0,
+  "pose_filter_degree": 1,
+  "pose_filter_min_samples": 5,
+  "pose_filter_lookahead_sec": 0.0,
+  "velocity_filter_window": 1,
+  "joint_speed_limits_deg": [114.6, 114.6, 114.6, 114.6, 114.6, 114.6],
+  "joint_acc_limits_deg": [200.5, 200.5, 200.5, 200.5, 200.5, 200.5],
+  "joint_error_deadband_deg": 0.08,
+  "piper_arms": {
+    "left": {
+      "can_name": "can_left",
+      "init_joint_position": [25.0, 120.0, -100.0, 80.0, 30.0, 0.0, 0.0],
+      "safe_disable_position": [25.0, 120.0, -100.0, 80.0, 30.0, 0.0, 0.0],
+      "joint_factor": 57296.0
+    },
+    "right": {
+      "can_name": "can_right",
+      "init_joint_position": [-25.0, 120.0, -100.0, -80.0, 30.0, -50.0, 0.0],
+      "safe_disable_position": [-25.0, 120.0, -100.0, -80.0, 30.0, -50.0, 0.0],
+      "joint_factor": 57296.0
+    }
+  }
+}

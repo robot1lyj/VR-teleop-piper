@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>VR Controller Stream</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="styles.css" />
+	    <script src="vendor/aframe.min.js?v=1.7.1"></script>
+	    <script src="binary_protocol.js?v=20251212" defer></script>
+	    <script src="vr_app.js?v=20251212" defer></script>
+	    <script src="interface.js?v=20250927" defer></script>
+	  </head>
+  <body>
+    <main class="panel">
+      <header class="panel__header">
+        <h1>VR Controller Stream</h1>
+        <p class="panel__subtitle">三步完成：填写 WebSocket、建立连接、进入 VR</p>
+      </header>
+
+      <section class="panel__section">
+        <label for="wsUrl">WebSocket 地址</label>
+        <div class="panel__row">
+          <input
+            id="wsUrl"
+            type="text"
+            autocomplete="off"
+            value="ws://172.31.4.113:8442"
+          />
+          <button id="connectBtn" type="button">连接</button>
+        </div>
+      </section>
+
+      <section class="panel__section">
+        <div class="panel__row panel__row--start">
+          <button id="startBtn" type="button">开启手柄追踪</button>
+          <span id="status" class="status status--idle">未连接</span>
+        </div>
+        <div class="panel__row panel__row--start hand-toggle">
+          <span class="label-inline">追踪模式</span>
+          <div class="hand-toggle__group">
+            <button type="button" class="hand-toggle__btn hand-toggle__btn--active" data-hand-mode="both">双手柄</button>
+            <button type="button" class="hand-toggle__btn" data-hand-mode="left">单臂（左）</button>
+            <button type="button" class="hand-toggle__btn" data-hand-mode="right">单臂（右）</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel__section">
+        <div class="tips">
+          <strong>提示</strong>
+          <ul>
+            <li>浏览器需要支持 WebXR（Quest 推荐使用内置 Oculus Browser）。</li>
+            <li>点击「连接」后状态变绿，再进入 VR/AR 会话。</li>
+            <li>握持键按住才会锁定起点，扳机键对应抓取开关。</li>
+            <li>长按任一手柄的 A/B（或 X/Y）键 1 秒即可退出手柄追踪。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="panel__section">
+        <label>实时日志</label>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <a-scene
+      id="vrScene"
+      embedded
+      renderer="colorManagement: true; antialias: false; precision: lowp"
+      controller-stream
+    >
+      <a-entity id="rig" position="0 1.6 0">
+        <a-entity camera></a-entity>
+      </a-entity>
+      <a-sky color="#101820"></a-sky>
+    </a-scene>
+  </body>
+</html>

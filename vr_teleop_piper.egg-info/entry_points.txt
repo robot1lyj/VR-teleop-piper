@@ -1,0 +1,2 @@
+[console_scripts]
+run-vr-piper = scripts.run_vr_piper:main

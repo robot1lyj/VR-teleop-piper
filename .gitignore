@@ -1,0 +1,12 @@
+AGENTS.md
+__pycache__/
+*.py[cod]
+*.so
+
+
+# IDE / editor
+.vscode/
+.idea/
+
+# System files
+.DS_Store
